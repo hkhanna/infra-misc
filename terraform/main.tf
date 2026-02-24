@@ -1,6 +1,20 @@
 terraform {
   required_version = "~> 1.14"
 
+  backend "s3" {
+    endpoints = {
+      s3 = "https://nyc3.digitaloceanspaces.com"
+    }
+    bucket = "khanna-tfstate"
+    key    = "infra-misc/terraform.tfstate"
+    region = "us-east-1"
+
+    skip_credentials_validation = true
+    skip_requesting_account_id  = true
+    skip_metadata_api_check     = true
+    skip_s3_checksum            = true
+  }
+
   required_providers {
     digitalocean = {
       source  = "digitalocean/digitalocean"

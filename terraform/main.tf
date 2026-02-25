@@ -51,6 +51,22 @@ resource "digitalocean_spaces_bucket" "this" {
   acl    = "public-read"
 }
 
+resource "digitalocean_domain" "s3" {
+  name = "s3.khanna.law"
+}
+
+resource "digitalocean_certificate" "spaces" {
+  name    = "spaces-cert"
+  type    = "lets_encrypt"
+  domains = ["s3.khanna.law"]
+}
+
+resource "digitalocean_cdn" "spaces" {
+  origin           = digitalocean_spaces_bucket.this.bucket_domain_name
+  custom_domain    = "s3.khanna.law"
+  certificate_name = digitalocean_certificate.spaces.name
+}
+
 output "ipv4_address" {
   description = "Public IPv4 address of the droplet"
   value       = digitalocean_droplet.this.ipv4_address

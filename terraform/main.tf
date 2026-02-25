@@ -38,11 +38,17 @@ data "digitalocean_ssh_key" "this" {
 }
 
 resource "digitalocean_droplet" "this" {
-  name     = "fun-redirects"
+  name     = "abigail"
   region   = "nyc3"
   size     = "s-1vcpu-512mb-10gb"
   image    = "debian-13-x64"
   ssh_keys = [data.digitalocean_ssh_key.this.id]
+}
+
+resource "digitalocean_spaces_bucket" "this" {
+  name   = "khanna-s3"
+  region = "nyc3"
+  acl    = "public-read"
 }
 
 output "ipv4_address" {

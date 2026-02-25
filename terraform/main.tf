@@ -37,13 +37,13 @@ data "digitalocean_ssh_key" "this" {
   name = "harry@eagle"
 }
 
-resource "digitalocean_droplet" "this" {
-  name     = "abigail"
-  region   = "nyc3"
-  size     = "s-1vcpu-512mb-10gb"
-  image    = "debian-13-x64"
-  ssh_keys = [data.digitalocean_ssh_key.this.id]
-}
+# resource "digitalocean_droplet" "this" {
+#   name     = "abigail"
+#   region   = "nyc3"
+#   size     = "s-1vcpu-512mb-10gb"
+#   image    = "debian-13-x64"
+#   ssh_keys = [data.digitalocean_ssh_key.this.id]
+# }
 
 resource "digitalocean_spaces_bucket" "this" {
   name   = "khanna-s3"
@@ -51,19 +51,26 @@ resource "digitalocean_spaces_bucket" "this" {
   acl    = "public-read"
 }
 
-resource "digitalocean_domain" "s3" {
-  name = "s3.khanna.law"
+resource "digitalocean_domain" "do" {
+  name = "do.khanna.law"
+}
+
+resource "digitalocean_record" "s3_cname" {
+  domain = digitalocean_domain.do.id
+  type   = "CNAME"
+  name   = "s3"
+  value  = "${digitalocean_cdn.spaces.endpoint}."
 }
 
 resource "digitalocean_certificate" "spaces" {
   name    = "spaces-cert"
   type    = "lets_encrypt"
-  domains = ["s3.khanna.law"]
+  domains = ["s3.do.khanna.law"]
 }
 
 resource "digitalocean_cdn" "spaces" {
   origin           = digitalocean_spaces_bucket.this.bucket_domain_name
-  custom_domain    = "s3.khanna.law"
+  custom_domain    = "s3.do.khanna.law"
   certificate_name = digitalocean_certificate.spaces.name
 }
 

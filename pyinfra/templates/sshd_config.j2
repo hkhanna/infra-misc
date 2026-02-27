@@ -1,0 +1,27 @@
+# Hardened SSH config — managed by pyinfra
+
+Port 22
+AddressFamily inet
+ListenAddress 0.0.0.0
+
+# Authentication
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+MaxAuthTries 3
+LoginGraceTime 30
+
+# Disable unused features
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+PermitTunnel no
+
+# Misc
+UsePAM yes
+PrintMotd no
+AcceptEnv LANG LC_*
+
+# Use systemd for session management
+Subsystem sftp /usr/lib/openssh/sftp-server

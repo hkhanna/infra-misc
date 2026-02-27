@@ -37,13 +37,13 @@ data "digitalocean_ssh_key" "this" {
   name = "harry@eagle"
 }
 
-# resource "digitalocean_droplet" "this" {
-#   name     = "abigail"
-#   region   = "nyc3"
-#   size     = "s-1vcpu-512mb-10gb"
-#   image    = "debian-13-x64"
-#   ssh_keys = [data.digitalocean_ssh_key.this.id]
-# }
+resource "digitalocean_droplet" "abigail" {
+  name     = "abigail"
+  region   = "nyc3"
+  size     = "s-1vcpu-512mb-10gb"
+  image    = "debian-13-x64"
+  ssh_keys = [data.digitalocean_ssh_key.this.id]
+}
 
 resource "digitalocean_spaces_bucket" "this" {
   name   = "khanna-s3"
@@ -76,5 +76,5 @@ resource "digitalocean_cdn" "spaces" {
 
 output "ipv4_address" {
   description = "Public IPv4 address of the droplet"
-  value       = digitalocean_droplet.this.ipv4_address
+  value       = digitalocean_droplet.abigail.ipv4_address
 }

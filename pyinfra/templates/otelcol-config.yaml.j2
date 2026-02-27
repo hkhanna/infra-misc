@@ -1,0 +1,44 @@
+receivers:
+  journald:
+    units:
+      - caddy
+    priority: info
+    start_at: end
+    operators:
+      - type: json_parser
+        parse_from: body
+
+processors:
+  memory_limiter:
+    limit_mib: 100
+    spike_limit_mib: 25
+    check_interval: 5s
+
+  resource:
+    attributes:
+      - key: service.name
+        value: caddy-redirect
+        action: upsert
+      - key: host.name
+        value: abigail
+        action: upsert
+
+  batch:
+    timeout: 5s
+    send_batch_size: 500
+
+exporters:
+  otlp/signoz:
+    endpoint: ${env:SIGNOZ_ENDPOINT}
+    tls:
+      insecure: false
+    headers:
+      signoz-ingestion-key: ${env:SIGNOZ_INGESTION_KEY}
+    compression: gzip
+
+service:
+  pipelines:
+    logs:
+      receivers: [journald]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp/signoz]

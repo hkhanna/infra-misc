@@ -1,3 +1,8 @@
 abigailspannberger.com {
+	log {
+		output stderr
+		format json
+	}
+
 	redir {{ host.data.redirect_url }}{uri}
 }

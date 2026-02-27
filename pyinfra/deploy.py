@@ -73,6 +73,57 @@ server.shell(
     _if=sysctl_config.did_change,
 )
 
+# --- OpenTelemetry Collector (log forwarding to SigNoz) ---
+
+OTELCOL_VERSION = "0.146.1"
+
+server.shell(
+    name="Install otelcol-contrib",
+    commands=[
+        f"wget -q https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{OTELCOL_VERSION}/otelcol-contrib_{OTELCOL_VERSION}_linux_amd64.deb -O /tmp/otelcol-contrib.deb",
+        "dpkg -i /tmp/otelcol-contrib.deb",
+        "rm /tmp/otelcol-contrib.deb",
+    ],
+    _if=f"! otelcol-contrib --version 2>/dev/null | grep -q '{OTELCOL_VERSION}'",
+)
+
+server.shell(
+    name="Add otelcol-contrib user to systemd-journal group",
+    commands=["usermod -aG systemd-journal otelcol-contrib"],
+)
+
+otelcol_config = files.template(
+    name="Deploy otelcol-contrib config",
+    src="templates/otelcol-config.yaml.j2",
+    dest="/etc/otelcol-contrib/config.yaml",
+    user="root",
+    group="root",
+    mode="644",
+)
+
+otelcol_env = files.template(
+    name="Deploy otelcol-contrib environment file",
+    src="templates/otelcol-contrib.conf.j2",
+    dest="/etc/otelcol-contrib/otelcol-contrib.conf",
+    user="root",
+    group="root",
+    mode="600",
+)
+
+systemd.service(
+    name="Restart otelcol-contrib",
+    service="otelcol-contrib",
+    restarted=True,
+    _if=lambda: otelcol_config.did_change or otelcol_env.did_change,
+)
+
+systemd.service(
+    name="Enable and start otelcol-contrib",
+    service="otelcol-contrib",
+    running=True,
+    enabled=True,
+)
+
 # --- Caddy reverse proxy (HTTPS redirect) ---
 
 apt.packages(

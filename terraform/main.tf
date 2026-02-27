@@ -74,6 +74,17 @@ resource "digitalocean_cdn" "spaces" {
   certificate_name = digitalocean_certificate.spaces.name
 }
 
+resource "digitalocean_domain" "abigailspannberger" {
+  name = "abigailspannberger.com"
+}
+
+resource "digitalocean_record" "abigailspannberger_a" {
+  domain = digitalocean_domain.abigailspannberger.id
+  type   = "A"
+  name   = "@"
+  value  = digitalocean_droplet.abigail.ipv4_address
+}
+
 output "ipv4_address" {
   description = "Public IPv4 address of the droplet"
   value       = digitalocean_droplet.abigail.ipv4_address

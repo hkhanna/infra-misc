@@ -1,0 +1,2874 @@
+=== /Users/harry/Code/pyinfra/docs/__init__.py ===
+
+=== /Users/harry/Code/pyinfra/docs/api/connectors.md ===
+# Writing Connectors
+
+[Connectors](../connectors) enable pyinfra to directly integrate with other tools and systems. Connectors are written as Python classes.
+
+Connectors come in three variations:
+
+ - Inventory only
+ - Execution only
+ - Inventory and Execution
+
+The last case just requires combining the two examples below and including any host/group gathering logic in `make_names_data`.
+
+## Inventory Connector
+
+Inventory connectors can return one or more hosts each invocation of `make_names_data`.
+
+In the example below `make_names_data` is yielding a hostname, data, groups tuple. As long as the final `yield` is a tuple though, the gathered data
+could be stored and processed in any data structure.
+
+```py
+from pyinfra.connectors.base import BaseConnector
+
+class InventoryConnector(BaseConnector):
+    handles_execution = False
+
+    @staticmethod
+    def make_names_data(_=None):
+        """
+        Generate inventory targets.
+
+        Yields:
+            tuple: (name, data, groups)
+        """
+        # connect to api/parse files/process data here, resulting in a list of tuples;
+        gathered_hosts = [
+            ('@local', {}, ['@local']),
+            ('foundhost', {'ip': '198.51.100.4'}, ['remote', 'example'])
+        ]
+
+        for loop_host in gathered_hosts:
+          yield loop_host[0], loop_host[1], loop_host[2]
+```
+
+To use the inventory connector call `pyinfra @[name of connector in pyinfra.connectors] [deployment script].py`
+
+The connector can also be run using `pyinfra @[name of connector in pyinfra.connectors]/[hostname] [deployment script].py`. If executed this way
+(inventory/data requested for a single host), `make_names_data(_=None)` should be updated to `make_names_data(name)` and the `name == None` case
+handled in code separately from `name` being a valid string.
+
+## Executing Connector
+
+A connector that implements execution requires a few more methods:
+
+```py
+class MyConnector(BaseConnector):
+    handles_execution = True
+
+    @staticmethod
+    def make_names_data(_=None):
+        ...  # see above
+
+    def run_shell_command(
+        self,
+        command: StringCommand,
+        print_output: bool = False,
+        print_input: bool = False,
+        **arguments: Unpack["ConnectorArguments"],
+    ) -> Tuple[bool, CommandOutput]:
+        """
+        Execute a command on the local machine.
+
+        Args:
+            command (StringCommand): actual command to execute
+            print_output (bool): whether to print command output
+            print_input (bool): whether to print command input
+            arguments: (ConnectorArguments): connector global arguments
+
+        Returns:
+            tuple: (bool, CommandOutput)
+            Bool indicating success and CommandOutput with stdout/stderr lines.
+        """
+
+    def put_file(
+        self,
+        filename_or_io,
+        remote_filename,
+        remote_temp_filename=None,  # ignored
+        print_output: bool = False,
+        print_input: bool = False,
+        **arguments,
+    ) -> bool:
+        """
+        Upload a local file or IO object by copying it to a temporary directory
+        and then writing it to the upload location.
+
+        Returns:
+            bool: indicating success or failure.
+        """
+
+    def get_file(
+        self,
+        remote_filename,
+        filename_or_io,
+        remote_temp_filename=None,  # ignored
+        print_output: bool = False,
+        print_input: bool = False,
+        **arguments,
+    ) -> bool:
+        """
+        Download a local file by copying it to a temporary location and then writing
+        it to our filename or IO object.
+
+        Returns:
+            bool: indicating success or failure.
+        """
+
+
+    # The following two optional methods can be used to hook into the connect/disconnect steps:
+    def connect(self) -> None:
+        """
+        Connect this connector instance. Should raise pyinfra.api.exceptions.ConnectError exceptions
+        to indicate failure.
+        """
+
+    def disconnect(self) -> None:
+        """
+        Disconnect this connector instance, should never fail.
+        """
+```
+
+## Where to make changes
+
+Connectors enable pyinfra to expand work done [in its 5 stages](../deploy-process) by providing methods which can be called at
+appropriate times.
+
+To hook in to the various steps with the methods outlined below.
+```
+--> Loading config...
+--> Loading inventory...
+```
+`make_names_data` is used to supply inventory data about a host while at 'Loading inventory' stage.
+
+Its worth being aware up front that due to `make_names_data` being a `staticmethod` it has no automatic access to the parent classes attributes.
+To work around this - e.g. to configure an API connector - configuration will have to happen outside the function and be imported in. Two examples
+(`getattr` and a function) are provided below.
+
+```py
+def load_settings():
+  settings = {}
+  # logic here
+  return settings
+
+class InventoryConnector(BaseConnector):
+  api_instance = external.ApiClient()
+  ...
+
+  @staticmethod
+  def make_names_data(_=None):
+    api_client = getattr(InventoryConnector, 'api_instance')
+    api_settings = load_settings()
+    ...
+```
+
+```
+--> Connecting to hosts...
+    [pytest.example.com] Connected
+```
+`connect` can be used to check access to a host is possible. If the connection fails `ConnectError` should be raised with a message to display on
+screen.
+
+```
+--> Preparing operations...
+--> Preparing Operations...
+    Loading: deploy_create_users.py
+    [pytest.example.com] Ready: deploy_create_users.py
+
+--> Detected changes:
+[list of changes here]
+
+--> Beginning operation run...
+--> Starting operation: sshd_install.py | Install OpenSSH server
+    [pytest.example.com] No changes
+```
+
+`run_shell_command`, `put_file`, `get_file` and `rsync` can be used to change behaviour of pyinfra as it performs operations.
+
+```
+--> Results:
+    Operation                                                                                            Hosts   Success   Error   No Change
+--> Disconnecting from hosts...
+```
+
+`disconnect` can be used after all operations complete to clean up any connection/s remaining to the hosts being managed.
+
+
+## Implementing `run_shell_command`
+
+When implementing `run_shell_command`, connectors should use pyinfra's command wrapping utilities rather than manually constructing commands. The `make_unix_command_for_host()` function from `pyinfra.connectors.util` handles shell wrapping, sudo elevation, environment variables, working directory changes, command retries and shell executable selection.
+
+Its worth being aware that when passing `arguments` to `make_unix_command_for_host()`, connector control parameters must be filtered out. These parameters (`_success_exit_codes`, `_timeout`, `_get_pty`, `_stdin`) are defined in `pyinfra.api.arguments.ConnectorArguments` and are meant for the connector's internal logic after command generation, not for command construction itself.
+
+The recommended approach is to use `extract_control_arguments()` from `pyinfra.connectors.util` which handles this filtering for you:
+
+```py
+from pyinfra.connectors.util import extract_control_arguments, make_unix_command_for_host
+
+class MyConnector(BaseConnector):
+    handles_execution = True
+
+    def run_shell_command(
+        self,
+        command: StringCommand,
+        print_output: bool = False,
+        print_input: bool = False,
+        **arguments: Unpack["ConnectorArguments"],
+    ) -> Tuple[bool, CommandOutput]:
+        """Execute a command with proper shell wrapping."""
+
+        # Extract and remove control parameters from arguments
+        # This modifies arguments dict in place and returns the extracted params
+        control_args = extract_control_arguments(arguments)
+
+        # Generate properly wrapped command with sudo, environment, etc
+        # arguments now contains only command generation parameters
+        wrapped_command = make_unix_command_for_host(
+            self.state,
+            self.host,
+            command,
+            **arguments,
+        )
+
+        # Use control parameters for execution
+        timeout = control_args.get("_timeout")
+        success_exit_codes = control_args.get("_success_exit_codes", [0])
+
+        # Execute the wrapped command using your connector's method
+        exit_code, output = self._execute(wrapped_command, timeout=timeout)
+
+        # Check success based on exit codes
+        success = exit_code in success_exit_codes
+
+        return success, output
+```
+
+Without proper command wrapping, shell operators and complex commands will fail. For example `timeout 60 bash -c 'command' || true` executed without shell wrapping will result in `bash: ||: command not found`. PyInfra operations and fact gathering rely on shell operators (`&&`, `||`, pipes, redirects) so using `make_unix_command_for_host()` ensures your connector handles these correctly.
+
+For complete examples see pyinfra's built-in connectors in `pyinfra/connectors/docker.py`, `pyinfra/connectors/chroot.py`, `pyinfra/connectors/ssh.py` and `pyinfra/connectors/local.py`, as well as the command wrapping utilities in `pyinfra/connectors/util.py`.
+
+
+## pyproject.toml
+
+In order for pyinfra to gain knowledge about your connector, you need to add the following snippet to your connector's `pyproject.toml`:
+
+```toml
+[project.entry-points.'pyinfra.connectors']
+# Key = Entry point name
+# Value = module_path:class_name
+custom = 'pyinfra_custom_connector.connector:LoggingConnector'
+```
+
+If modifying pyinfra directly, `pyinfra.connectors` should be added to `setup.py`.
+
+
+=== /Users/harry/Code/pyinfra/docs/api/deploys.md ===
+# Packaging Deploys
+
+Operations in pyinfra execute low-level system tools (filesystem, systemd, package manager, etc). A **deploy** is a higher level abstraction, combining one or more operations together to setup and configure something (docker, certbot, nginx, etc).
+
+Deploys are usually defined by the user (see [Using Operations](../using-operations)). It is also possible to package deploys as Python modules making them reusable and shareable via [pypi](https://pypi.org/). These can then be imported into your own deploy code and utilised.
+
+Packaging a deploy essentially requires two changes from the usual deploy code:
+
++ Wrap everything in a function decorated with `@deploy(NAME)`
+
+```py
+from pyinfra.api import deploy
+from pyinfra.operations import apt
+
+@deploy("Install MariaDB")
+def install_mariadb():
+    apt.packages(
+        name="Install MariaDB apt package",
+        packages=["mariadb-server"],
+    )
+```
+
+This could then be used like so:
+
+```py
+from packaged_deploy import install_mariadb
+install_mariadb()
+```
+
+## Examples
+
++ [`pyinfra-docker`](https://github.com/Fizzadar/pyinfra-docker) is a basic, no argument deploy that simply installs Docker
++ [`pyinfra-prometheus`](https://github.com/grantstephens/pyinfra-prometheus) is a more complex package containing multiple deploys that can be used to install Prometheus instances and various exporter services
+
+## Global Arguments
+
+Deploys accept the same [global arguments as operations](../arguments) and they apply to every operation call within that deploy. Taking the above example:
+
+
+```py
+from packaged_deploy import install_mariadb
+install_mariadb(sudo=True)
+```
+
+## Data in Deploys
+
+Deploys can define their own set of data defaults. Any user provided host or group data with the same name will take precedent. This enables deploys to provide their own sensible default options and enable end-users to customise this by modifying group/host data.
+
+```py
+from pyinfra import host
+from pyinfra.api import deploy
+from pyinfra.operations import apt
+
+DEFAULTS = {
+    "mariadb_version": "1.2.3",
+}
+
+@deploy("Install mariadb", data_defaults=DEFAULTS)
+def install_mariadb():
+    apt.packages(
+        name="Install MariaDB apt package",
+        packages=[f"mariadb-server={host.data.mariadb_version}"],
+    )
+```
+
+=== /Users/harry/Code/pyinfra/docs/api/facts.md ===
+# Writing Facts
+
+[Facts](../facts) are written as Python classes. They provide a ``command`` (as either a string or method)
+and a ``process`` function. The command is executed on the target host and the output
+passed (as a ``list`` of lines) to the ``process`` handler to generate fact data. Facts can output anything, normally a ``list`` or ``dict``.
+
+Fact classes may provide a ``default`` function that takes no arguments (except ``self``). The return value of this function is used if an error
+occurs during fact collection. Additionally, a ``requires_command`` variable can be set on the fact that specifies a command that must be available
+on the host to collect the fact. If this command is not present on the host, the fact will be set to the default, or empty if no ``default`` function
+is available.
+
+### Importing & Using Facts
+
+Like operations, facts are imported from Python modules and executed by calling `Host.get_fact`. For example:
+
+```py
+from pyinfra import host
+from pyinfra.facts.server import Which
+
+host.get_fact(Which, command='htop')
+```
+
+### Example: getting swap status
+
+This fact returns a boolean indicating whether swap is enabled. For this fact the ``command`` is declared as a class attribute.
+
+```py
+from  pyinfra.api import FactBase
+
+class SwapEnabled(FactBase):
+    '''
+    Returns a boolean indicating whether swap is enabled.
+    '''
+
+    command = 'swapon --show'
+
+    def process(self, output):
+        return len(output) > 0  # we have one+ lines
+```
+
+This fact could then be used like so:
+
+```py
+is_swap_enabled = host.get_fact(SwapEnabled)
+```
+
+### Example: getting the list of files in a directory
+
+This fact returns a list of files found in a given directory. For this fact the ``command`` is declared as a class method, indicating the fact takes arguments.
+
+```py
+from pyinfra.api import FactBase
+
+class FindFiles(FactBase):
+    '''
+    Returns a list of files from a start point, recursively using find.
+    '''
+
+    def command(self, path):
+        # Find files in the given location
+        return 'find {0} -type f'.format(path)
+
+    def process(self, output):
+        return output  # return the list of lines (files) as-is
+```
+
+This fact could then be used like so:
+
+```py
+list_of_files = host.get_fact(FindFiles, path='/somewhere')
+```
+
+### Example: getting any output from a command
+
+This fact returns the raw output of any command. For this fact the ``command`` is declared as a class method, indicating the fact takes arguments.
+
+```py
+from pyinfra.api import FactBase
+
+class RawCommandOutput(FactBase):
+    '''
+    Returns the raw output of a command.
+    '''
+
+    def command(self, command):
+        return command
+
+    def process(self, output):
+        return '\n'.join(output)  # re-join and return the output lines
+```
+
+This fact could then be used like so:
+
+```py
+command_output = host.get_fact(RawCommandOutput, command='execute this command')
+```
+
+=== /Users/harry/Code/pyinfra/docs/api/index.rst ===
+Using the API
+=============
+
+In addition to :doc:`the pyinfra CLI <../cli>`, pyinfra provides a full Python API. As of ``v3`` this API can be considered mostly stable. See the :doc:`./reference`.
+
+You can also reference `pyinfra's own main.py <https://github.com/pyinfra-dev/pyinfra/blob/3.x/src/pyinfra_cli/main.py>`_, and the `pyinfra API source code <https://github.com/pyinfra-dev/pyinfra/tree/3.x/src/pyinfra/api>`_.
+
+Full Example
+------------
+
+`A full example of how to use the API can be found here <https://github.com/pyinfra-dev/pyinfra-examples/blob/main/.old/api_deploy.py>`_. (Note: this is not yet tested and is pending future updates)
+
+Basic Localhost Example
+-----------------------
+
+.. code:: python
+
+   from pyinfra.api import Config, Inventory, State
+   from pyinfra.api.connect import connect_all
+   from pyinfra.api.operation import add_op
+   from pyinfra.api.operations import run_ops
+   from pyinfra.api.facts import get_facts
+   from pyinfra.facts.server import Os
+   from pyinfra.operations import server
+
+   # Define your inventory (@local means execute on localhost using subprocess)
+   # https://docs.pyinfra.com/en/3.x/apidoc/pyinfra.api.inventory.html
+   inventory = Inventory((["@local"], {}))
+
+   # Define any config you need
+   # https://docs.pyinfra.com/en/3.x/apidoc/pyinfra.api.config.html
+   config = Config(SUDO=True)
+
+   # Set up the state object
+   # https://docs.pyinfra.com/en/3.x/apidoc/pyinfra.api.state.html
+   state = State(inventory=inventory, config=config)
+
+   # Connect to all the hosts
+   connect_all(state)
+
+   # Start adding operations
+   result1 = add_op(
+       state,
+       server.user,
+       user="pyinfra",
+       home="/home/pyinfra",
+       shell="/bin/bash",
+   )
+   result2 = add_op(
+       state,
+       server.shell,
+       name="Run some shell commands",
+       commands=["whoami", "echo $PATH", "bash --version"]
+   )
+
+   # And finally we run the ops
+   run_ops(state)
+
+   # add_op returns an OperationMeta for each op, letting you access stdout, stderr, etc. after they run
+   host = state.hosts.inventory['@local']
+   print(result1.changed, result1[host].stdout, result1[host].stderr)
+   print(result2.changed, result2[host].stdout, result2[host].stderr)
+
+   # We can also get facts for all the hosts
+   # https://docs.pyinfra.com/en/3.x/apidoc/pyinfra.api.facts.html
+   print(get_facts(state, Os))
+
+=== /Users/harry/Code/pyinfra/docs/api/operations.md ===
+# Writing Operations
+
+[Operations](../operations) are defined as Python functions. They are passed the current deploy state, the target host, and any operation arguments. Operation functions read state from the host, compare it to the arguments, and yield commands.
+
+### Input: arguments
+
+Operations can accept any arguments except ``name`` and those starting with ``_`` which are reserved for internal use.
+
+```py
+@operation()
+def my_operation(...):
+    ...
+```
+
+### Output: commands
+
+Operations are generator functions and ``yield`` three types of command:
+
+```py
+# Shell commands, simply represented by a string OR the `StringCommand` class
+yield StringCommand("echo", "Shell!")
+
+# File uploads represented by the `FileUploadCommand` class
+yield FileUploadCommand(filename_or_io, remote_filename)
+
+# File downloads represented by the `FileDownloadCommand` class
+yield FileDownloadCommand(remote_filename, filename_or_io)
+
+# Python functions represented by the `FunctionCommand` class
+yield FunctionCommand(function, args_list, kwargs_dict)
+
+# Additionally, commands can override most global arguments
+yield StringCommand("echo", "Shell!", _sudo=True)
+```
+
+Operations can also call other operations using ``yield from <operation>._inner`` syntax.
+```py
+yield from files.file._inner(
+    path="/some/file",
+    ...,
+
+    # Only arguments for the operation itself are allowed, global arguments
+    # such as e.g. _sudo are not accepted.
+)
+```
+
+### Example: managing files
+
+This is a simplified version of the ``files.file`` operation, which will create/remove a
+remote file based on the ``present`` kwargs:
+
+```py
+from pyinfra import host
+from pyinfra.api import operation
+from pyinfra.facts.files import File
+
+@operation()
+def file(path, present=True):
+    '''
+    Manage the state of files.
+
+    + path: name/path of the remote file
+    + present: whether the file should exist
+    '''
+
+    info = host.get_fact(File, path=path)
+
+    # Not a file?!
+    if info is False:
+        raise OperationError("{0} exists and is not a file".format(path))
+
+    # Doesn't exist & we want it
+    if info is None and present:
+        yield "touch {0}".format(path)
+
+    # It exists and we don't want it
+    elif info and not present:
+        yield "rm -f {0}".format(path)
+```
+
+=== /Users/harry/Code/pyinfra/docs/api/reference.rst ===
+API Reference
+=============
+
+The pyinfra API is designed to be used as follows:
+
+1. Create the state we are going to operate on, which consists of:
+    - An inventory ``pyinfra.api.Inventory`` containing hosts ``pyinfra.api.Host``, plus any data
+    - A config ``pyinfra.api.Config`` for global flag
+    - A state ``pyinfra.api.State`` that combines the inventory & config
+2. Now that state is setup, we define operations:
+    - ``pyinfra.api.operation.add_op``
+    - ``pyinfra.api.add_deploy``
+3. Now that's done, we execute it:
+    - ``pyinfra.api.operations.run_ops``
+
+Currently the best example of this in action is in `pyinfra's own main.py <https://github.com/pyinfra-dev/pyinfra/blob/3.x/pyinfra_cli/main.py>`_.
+
+.. toctree::
+    :caption: Core API
+    :maxdepth: 1
+    :glob:
+
+    ../apidoc/*
+
+=== /Users/harry/Code/pyinfra/docs/arguments.rst ===
+.. arguments:
+
+Global Arguments
+================
+
+In addition to each operations having its own arguments, there are a number of keyword arguments available in all facts, operations and deploys.
+
+.. note::
+    With the exception of ``name`` these are prefixed with ``_`` to avoid clashes with other operation and deploy arguments.
+
+.. include:: _deploy_globals.rst
+
+=== /Users/harry/Code/pyinfra/docs/changes.rst ===
+Changes
+=======
+
+.. include:: ../CHANGELOG.md
+   :parser: myst_parser.sphinx_
+
+=== /Users/harry/Code/pyinfra/docs/cli.md ===
+# Using the CLI
+
+pyinfra is an extremely powerful tool for ad-hoc execution and management of remote servers.
+
+
+## CLI arguments & options
+
+As described in the [getting started page](./getting-started), pyinfra needs an **inventory** and some **operations**. These are used with the CLI as below:
+
+```sh
+Usage: pyinfra [OPTIONS] INVENTORY OPERATIONS...
+
+# INVENTORY
+
++ a file (inventory.py)
++ hostname (host.net)
++ Comma separated hostnames: host-1.net,host-2.net,@local
+
+# OPERATIONS
+
+# Run one or more deploys against the inventory
+pyinfra INVENTORY deploy_web.py [deploy_db.py]...
+
+# Run a single operation against the inventory
+pyinfra INVENTORY server.user pyinfra home=/home/pyinfra
+
+# Execute an arbitrary command on the inventory
+pyinfra INVENTORY exec -- echo "hello world"
+
+# Run one or more facts on the inventory
+pyinfra INVENTORY fact server.LinuxName [server.Users]...
+pyinfra INVENTORY fact files.File path=/path/to/file...
+
+# Debug (print) inventory hosts, groups and data
+pyinfra INVENTORY debug-inventory
+```
+
+### Verbosity
+
+By default, pyinfra only prints high level information (this host connected, this operation started), this can be increased as follows:
+
++ `-v`: print out facts collected as well as noop information (package X already installed)
++ `-vv`: as above plus print shell input to the remote host
++ `-vvv` as above plus print shell output from the remote host
+
+### Retry Options
+
+pyinfra supports automatic retry of failed operations via CLI options:
+
++ `--retry N`: Retry failed operations up to N times (default: 0)
++ `--retry-delay N`: Wait N seconds between retry attempts (default: 5)
+
+```sh
+# Retry failed operations up to 3 times with default 5 second delay
+pyinfra inventory.py deploy.py --retry 3
+
+# Retry with custom delay
+pyinfra inventory.py deploy.py --retry 2 --retry-delay 10
+```
+
+
+## Inventory
+
+When using pyinfra inventory can be provided directly via the command line or [defined in a file](./inventory-data). Both support the full range of [connectors](./connectors) and multiple hosts. Some CLI examples:
+
+```sh
+# Load inventory hosts from a file
+pyinfra inventory.py ...
+
+# Execute via SSH against two servers
+pyinfra my-server.net,my-other-server.net ...
+
+# Execute on the local machine via subprocess
+pyinfra @local ...
+
+# Execute via local subprocess and a server over SSH
+pyinfra my-server.net,@local ...
+
+# Execute against a Docker container
+pyinfra @docker/fedora:43 ...
+```
+
+### Limit
+
+It is possible to limit the inventory at execution time using the `--limit` argument. Multiple `--limit`s can be provided. The value must either match a specific host by name or via glob style pattern, eg:
+
+```sh
+# Only execute against @local
+pyinfra inventory.py deploy.py --limit @local
+
+# Only execute against hosts in the `app_servers` group
+pyinfra inventory.py deploy.py --limit app_servers
+
+# Only execute against hosts with names matching db*
+pyinfra inventory.py deploy.py --limit "db*"
+
+# Combine multiple limits
+pyinfra inventory.py deploy.py --limit app_servers --limit db-1.net
+```
+
+
+## Ad-hoc command execution
+
+pyinfra can execute shell commands on remote hosts by using `pyinfra exec`. For example:
+
+```sh
+pyinfra inventory.py exec -- my_command_goes_here --some-argument
+```
+
+Note:
+    Anything on the right hand side of the ``--`` will be passed into the target
+
+### Example: debugging distributed services using pyinfra
+
+One of pyinfra's top design features is its ability to return remote command output in real-time. This can be used to debug N remote services, and is perfect for debugging distributed services.
+
+For example - a large Elasticsearch cluster. It can be useful to stream the log of every instance in parallel, which can be achieved easily like so:
+
+```sh
+pyinfra inventory.py exec --sudo -- tail -f /var/log/elasticsearch/elasticsearch.log
+```
+
+## Executing ad-hoc operations
+
+In addition to executing simple commands, pyinfra can execute any of it's builtin operations on remote hosts direct via the CLI.
+
+### Example: managing packages with ad-hoc pyinfra commands
+
+For example, here we ensure that `nginx` is installed on the remote servers:
+
+```sh
+# Ubuntu example
+pyinfra inventory.py apt.packages nginx update=true _sudo=true
+
+# Fedora example
+pyinfra inventory2.py yum.packages nginx _sudo=true
+```
+
+### Example: managing services with ad-hoc pyinfra commands
+
+Now that nginx is installed on the box, we can use pyinfra to control the ``nginx`` service - here we ensure it's running and enabled to start on system boot:
+
+```sh
+pyinfra inventory.py init.service nginx running=true enabled=true
+```
+
+#### Example: rebooting with ad-hoc pyinfra commands
+
+We can reboot instances a couple of ways using adhoc commands (assuming *sudo* is enabled in inventory.py):
+
+```sh
+# using server.reboot()
+pyinfra inventory.py server.reboot reboot_timeout=0 delay=0
+
+# using exec
+pyinfra inventory.py exec -- reboot
+```
+
+#### Additional debug info
+
+For additional debug info, use one of these options:
+
++ `--debug` Print debug info.
++ `--debug-facts` Print facts after generating operations and exit.
++ `--debug-operations` Print operations after generating and exit.
+
+
+## Shell Autocompletion
+
+Add the following to your `~/.bash_profile` or `~/.profile` files:
+
++ **bash** `source scripts/pyinfra-complete.sh`.
++ **zsh** `source scripts/pyinfra-complete.zsh`.
+
+These files were generated using these commands:
+
+```
+env _PYINFRA_COMPLETE=bash_source pyinfra > pyinfra-complete.sh
+env _PYINFRA_COMPLETE=zsh_source pyinfra > pyinfra-complete.zsh
+```
+
+=== /Users/harry/Code/pyinfra/docs/compatibility.md ===
+# Compatibility
+
+This page describes the compatibility guarantees pyinfra offers.
+
+
+## pyinfra Versions
+
+Where possible pyinfra follows [semantic versioning](https://semver.org/) rules. This means no breaking changes between minor versions (`1.0` -> `1.1`). Such changes are reserved for major version increases only. pyinfra will also generate warnings in CLI mode for any deprecated features due to be removed at the next major release. These are the pyinfra specific semver rules:
+
++ **Major**: breaking changes, warnings will show on latest previous major version
++ **Minor**: new operations, new APIs, new global arguments, deprecate & add warnings
++ **Patch**: new operation arguments for existing operations, bug fixes, documentation updates
+
+## Control Systems
+
+pyinfra works on anywhere that runs Python - Mac, Linux & Windows are all supported.
+
+### Editor Integration
+
+#### PyCharm
+
+To debug pyinfra within PyCharm, you need to [explicitly enable support for Gevent](https://blog.jetbrains.com/pycharm/2012/08/gevent-debug-support/).
+
+
+## Remote Systems
+
+pyinfra aims to be compatible with all Unix-like operating systems and is currently developed against:
+
++ Linux distros:
+    * Ubuntu 20/22/24
+    * Debian 9/10
+    * Fedora 43
+    * Alpine 3.8
++ BSD flavours:
+    * OpenBSD 6
+    * FreeBSD 12
+    * NetBSD 9
+    * HardenedBSD 11
+    * DragonflyBSD 5
++ OpenSUSE (leap15 + tumbleweed)
++ macOS 10.15 (with [`@local` connector](./connectors/local))
++ Docker (with [`@docker` connector](./connectors/docker))
+
+In general, the only requirement on the remote side is shell access. POSIX commands are used where possible for facts and operations, so most of the ``server`` and ``files`` operations should work anywhere POSIX.
+
+
+## Upgrading pyinfra from ``2.x`` -> ``3.x``
+
+- Rename `_use_sudo_password` argument to `_sudo_password`
+- Deploy decorator must be called:
+
+```py
+# Old, 2.x decorator
+@deploy
+def mydeploy():
+    ...
+
+# New, 3.x decorator
+@deploy()
+def mydeploy():
+    ...
+```
+
+- Remove `@winrm` connector, will come back as [`pyinfra-windows`](https://github.com/pyinfra-dev/pyinfra-windows)
+
+## Upgrading pyinfra from ``1.x`` -> ``2.x``
+
+- Python 2.7 (finally!), 3.5 support dropped, Python 3.6 is now the minimum required version
+- The "deploy directory" concept has been removed - everything now executes from the current working directory which removes the ambiguous magic v1 used to pick a deploy directory. A new --chdir CLI flag has been added to set the working directory before pyinfra executes
+
+## Upgrading pyinfra from ``0.x`` -> ``1.x``
+
+The move to `v1` removes a lot of old legacy functionality in pyinfra - there will be warnings written to the user in CLI mode if any of these are encountered. The full list can be seen [on the changelog](https://github.com/Fizzadar/pyinfra/blob/master/CHANGELOG.md#v1). In addition to these removals, `v1` brings a few major changes and deprecates the old methods. Again, pyinfra will output warnings when these are encountered, and support will be removed in `v2`.
+
+### Rename the modules module
+
+`v1` has moved where operations are imported from to make more sense:
+
+```py
+# Old, 0.x import:
+from pyinfra.modules import server
+
+# New, 1.x import:
+from pyinfra.operations import server
+```
+
+### Naming operations
+
+`v1` adds a global `name` argument to all operations. This replaces passing a `set` as the first argument which was confusing:
+
+```py
+# Old, 0.x style:
+server.shell(
+    {'Execute some shell'},
+    commands=['someshell'],
+)
+
+# New, 1.x style:
+server.shell(
+    name='Execute some shell',
+    commands=['someshell'],
+)
+```
+
+=== /Users/harry/Code/pyinfra/docs/conf.py ===
+from datetime import date
+from os import environ, mkdir, path
+from shutil import rmtree
+
+import guzzle_sphinx_theme
+
+from pyinfra import __version__, local
+from pyinfra.api import metadata
+
+copyright = "Nick Barrett {0} — pyinfra v{1}".format(
+    date.today().year,
+    __version__,
+)
+
+extensions = [
+    "sphinx.ext.autodoc",
+    "sphinx.ext.napoleon",
+    "sphinx.ext.autosectionlabel",
+    "guzzle_sphinx_theme",
+    "myst_parser",
+]
+autosectionlabel_prefix_document = True
+
+source_suffix = [".rst", ".md"]
+
+master_doc = "index"
+project = "pyinfra"
+author = "Fizzadar"
+
+version = environ.get("DOCS_VERSION", "latest")
+language = "en"
+
+pygments_style = "monokai"
+
+# Theme style override
+html_short_title = "Home"
+html_theme = "guzzle_sphinx_theme"
+html_theme_path = guzzle_sphinx_theme.html_theme_path()
+html_static_path = ["static"]
+html_theme_options = {
+    "docsearch_api_key": "25a25b5f5310f306641f9ce07dcb06eb",
+    "docsearch_app_id": "XXGX6EX4KA",
+    "docsearch_index_name": "pyinfra",
+    "plausible_domain": "docs.pyinfra.com",
+    "plausible_stats_domain": "stats.oxygem.com",
+    "doc_versions": ["3.x", "2.x", "1.x", "0.x", "latest"],
+    "primary_doc_version": "3.x",
+}
+
+myst_heading_anchors = 3
+
+templates_path = ["templates"]
+
+html_favicon = "static/logo_small.png"
+
+exclude_patterns = [
+    "_deploy_globals.rst",
+]
+
+
+def rstjinja(app, docname, source):
+    """
+    Render certain pages as a jinja templates.
+    """
+    # this should only be run when building html
+    if app.builder.format != "html":
+        return
+    # We currently only render docs/operations.rst
+    # and docs/facts.rst as jinja2 templates
+    if docname in ["operations", "facts"]:
+        src = source[0]
+        rendered = app.builder.templates.render_string(src, app.config.html_context)
+        source[0] = rendered
+
+
+def setup(app):
+    app.connect("source-read", rstjinja)
+    this_dir = path.dirname(path.realpath(__file__))
+    scripts_dir = path.abspath(path.join(this_dir, "..", "scripts"))
+    metadata_file = path.abspath(path.join(this_dir, "..", "pyinfra-metadata.toml"))
+    if not path.exists(metadata_file):
+        raise ValueError("No pyinfra-metadata.toml in project root")
+    with open(metadata_file, "r") as file:
+        metadata_text = file.read()
+    plugins = metadata.parse_plugins(metadata_text)
+
+    operation_plugins = sorted([p for p in plugins if p.type == "operation"], key=lambda p: p.name)
+    fact_plugins = sorted([p for p in plugins if p.type == "fact"], key=lambda p: p.name)
+    html_context = {
+        "operation_plugins": operation_plugins,
+        "fact_plugins": fact_plugins,
+        "tags": metadata.ALLOWED_TAGS,
+        "docs_language": language,
+        "docs_version": version,
+    }
+    app.config.html_context = html_context
+
+    for auto_docs_name in ("operations", "facts", "apidoc", "connectors"):
+        auto_docs_path = path.join(this_dir, auto_docs_name)
+        if path.exists(auto_docs_path):
+            rmtree(auto_docs_path)
+        mkdir(auto_docs_path)
+
+    local.shell(
+        (
+            "python {0}/generate_api_docs.py".format(scripts_dir),
+            "python {0}/generate_arguments_doc.py".format(scripts_dir),
+            "python {0}/generate_connectors_docs.py".format(scripts_dir),
+            "python {0}/generate_facts_docs.py".format(scripts_dir),
+            "python {0}/generate_operations_docs.py".format(scripts_dir),
+        ),
+        print_input=True,
+    )
+
+=== /Users/harry/Code/pyinfra/docs/connectors.rst ===
+Connectors Index
+================
+
+.. raw:: html
+
+  <nav class="under-title-tabs">
+    See also:
+    <a href="operations.html">Operations Index</a>
+    <a href="facts.html">Facts Index</a>
+  </nav>
+
+Connectors enable pyinfra to integrate with other tools out of the box. Connectors can do one of three things:
+
++ Implement how commands are executed (``@ssh``, ``@local``)
++ Generate inventory hosts and data (``@terraform`` and ``@vagrant``)
++ Both of the above (``@docker``)
+
+Each connector page is listed below and contains examples as well as a list of available data that can be used to configure the connector.
+
+**Want a new connector?** Check out :doc:`the writing connectors guide <./api/connectors>`.
+
+.. raw:: html
+
+   <h3>Popular connectors</h3>
+   <div class="flex">
+
+.. admonition:: :doc:`connectors/ssh`
+   :class: note flex-half
+
+   Connect to any SSH server.
+
+.. admonition:: :doc:`connectors/docker`
+   :class: note flex-half
+
+   Create or modify Docker containers.
+
+.. admonition:: :doc:`connectors/terraform`
+   :class: note flex-half
+
+   Get SSH targets from Terraform output.
+
+.. admonition:: :doc:`connectors/local`
+   :class: note flex-half
+
+   Connect to the local machine running pyinfra.
+
+.. raw:: html
+
+   </div>
+   <h3>All connectors</h3>
+
+.. toctree::
+   :maxdepth: 1
+   :glob:
+
+   connectors/*
+
+=== /Users/harry/Code/pyinfra/docs/contributing.md ===
+# Contributing
+
+🎉 Thank you for taking the time to contribute to pyinfra! 🎉
+
+Third party pull requests help expand pyinfra's functionality and are essential to its continued growth. This guide should help get you started adding additional operations, facts and other functionality to pyinfra.
+
+## Guides
+
++ [How to write operations](api/operations)
++ [How to write facts](api/facts)
++ [How to write connectors](api/connectors) - note that new connectors **will not be merged to pyinfra**, instead they should be provided as a separate installable package. PR's that link to these packages in the docs very welcome.
++ Low level [API reference](api/reference) - this is pyinfra's internal APIs and does not come with the same compatibility guarantees as facts & operations - ie expect breaking changes on non-major versions.
+
+## Branches
+
++ There is a branch per major version, ie `3.x`, that tracks the latest release of that version
++ Changes should generally be based off the latest major branch, unless fixing an old version
+
+## Dev Setup
+
+First, install [uv](https://docs.astral.sh/uv/).
+
+Then, set up a development environment:
+
+```sh
+# There is no need to create a virtualenv, uv will do that for you
+
+# Clone the repo
+git clone git@github.com:pyinfra-dev/pyinfra.git
+
+# Install the package in editable mode with development requirements
+cd pyinfra
+uv sync
+```
+
+### Code Style & Type Checking
+
+Code style is enforced via [ruff](https://docs.astral.sh/ruff/). Types are checked with mypy currently, and pyright is
+recommended for local development though currently optional. There is a script to run the linting & type-checking:
+
+```sh
+# Check formatting & types
+scripts/dev-lint.sh
+
+# Fix formatting
+scripts/dev-format.sh
+```
+
+### Commit Messages
+
+Please try to use consistent commit messages, look at the [recent history](https://github.com/pyinfra-dev/pyinfra/commits/) for examples. PRs that follow this will be rebased, PRs that do not will be squashed.
+
+### Tests
+
+GitHub will run all the test suites as part of any pull requests. There's a handy script that runs the unit tests:
+
+```sh
+scripts/dev-test.sh
+```
+
+To limit the pytests to a specific fact or operation:
+
+```sh
+# Only run fact tests for facts.efibootmgr.EFIBootMGR
+uv run pytest tests/test_facts.py -k "efibootmgr.EFIBootMGR"
+
+# Only run operation tests for operations.selinux
+uv run pytest tests/test_operations.py -k "selinux."
+```
+
+#### End-to-End Tests
+
+The end-to-end tests are also executed via `pytest` but not selected by default, options/usage:
+
+```sh
+# Run all the e2e tests (local, SSH, Docker)
+scripts/dev-test-e2e.sh
+
+# Run local e2e tests (works on Linux / MacOS, no Windows yet)
+uv run pytest -m end_to_end_local
+
+# Run Docker and SSH e2e tests (Linux / MacOS with Docker installed)
+uv run pytest -m end_to_end_ssh
+uv run pytest -m end_to_end_docker
+```
+
+## Documentation
+
+Documentation changes should be made in the [pyinfra git repository](https://github.com/pyinfra-dev/pyinfra) - the repository `docs.pyinfra.com` should
+not be changed, it contains build artifacts.
+
+### Generate Documentation
+
+To generate:
+
+```sh
+scripts/build-public-docs.sh
+```
+
+To view ([localhost:8000](http://localhost:8000)):
+
+```sh
+uv run -m http.server -d docs/public/en/latest/
+```
+
+=== /Users/harry/Code/pyinfra/docs/deploy-process.rst ===
+How pyinfra Works
+=================
+
+pyinfra executes in five of stages:
+
+1. **Setup** phase, read the inventory / data
+2. **Connect** to the targets in the inventory
+3. **Prepare** by detecting changes and determining operation order
+4. **Execute** the changes on the targets
+5. **Disconnect** and cleanup
+
+Every time you run pyinfra it steps through each of these stages with the goal of updating the inventory to match the commands or state provided. Most of these stages are simple to reason about. The one exception to this is the **prepare**, or change detection, phase which is used to define the order operations are executed.
+
+How pyinfra Detects Changes & Orders Operations
+---------------------------------------------------
+
+Below we'll look at an in depth example that explains why the prepare / ordering stage is so critical. This example deploys a single database server and three webservers, here's the inventory:
+
+.. code:: python
+
+    web_servers = ["web-01", "web-02", "web-03"]
+    db_server = ["db-01"]
+
+And here's the deploy code:
+
+.. code:: python
+
+    from pyinfra import host
+    from pyinfra.operations import apt
+
+    apt.packages(
+        name="Install base debugging packages",
+        packages=["htop", "iftop"],
+        update=True,
+        cache_time=3600,
+    )
+
+    if "db_server" in host.groups:
+        apt.packages(
+            name="Install postgres server",
+            packages=["postgresql-server"],
+        )
+
+    if "web_servers" in host.groups:
+        apt.packages(
+            name="Install nginx",
+            packages=["nginx"],
+        )
+
+The deploy code is written as if executing a single host. To execute it over multiple hosts requires pyinfra to run the code once for each host. We can't do this host by host or pyinfra would be really slow. But if we do it in parallel we can't ensure operations run in expected order.
+
+The aim is that each operation runs in order, stopping at the end of operation until all hosts have completed or failed it before moving onto the next. So operations are sequential but each individual operation is executed on all hosts in parallel, like so:
+
+.. code::
+
+    - run "Install base debugging packages" on all hosts in parallel (web-01, web-02, web-03, db-01)
+    - run "Install postgres server" on db-01
+    - run "Upload postgres pg_hba config" on db-01
+    - run "Install nginx" on web hosts in parallel (web-01, web-02, web-03)
+    - run "Upload nginx config" on web hosts in parallel (web-01, web-02, web-03)
+
+To make this possible we have to first execute the code to generate the order and then execute the actual operations. This is why deploy code is always executed before any changes are made.
+
+When does this matter?
+----------------------
+
+Using Host Facts
+~~~~~~~~~~~~~~~~
+
+.. Caution::
+    Only use immutable facts in deploy code (installed OS, Arch, etc) unless you are absolutely sure they will not change.
+
+Let's look at an example - the deploy code here is bad but highlights the ordering problems:
+
+.. code:: python
+
+    from pyinfra import facts, host
+    from pyinfra.operations import apt
+    from pyinfra.facts.files import File
+
+    apt.packages(
+        name="Install nginx",
+        packages=["nginx"],
+    )
+
+    if host.get_fact(File, path="/etc/nginx/sites-enabled/default"):
+        files.file(
+            name="Remove nginx default site",
+            path="/etc/nginx/sites-enabled/default",
+            present=False,
+        )
+
+The critical thing to remember is that when you execute ``pyinfra INVENTORY deploy.py`` the deploy code is run *before* the operations are actually executed. This enables pyinfra to figure out the correct order for operations (see below for a detailed explanation).
+
+The problem here is the conditional check:
+
+.. code:: python
+
+    if host.get_fact(facts.files.File, path="/etc/nginx/sites-enabled/default"):
+
+This gets executed *before* the ``apt.packages`` install, and evaluates to ``False``. But at execution time this would actually become ``True``. The solution is simple - rely on pyinfra's operations to describe the desired state and always call the second:
+
+.. code:: python
+
+    from pyinfra import facts, host
+    from pyinfra.operations import apt, files
+
+    apt.packages(
+        name="Install nginx",
+        packages=["nginx"],
+    )
+
+    files.file(
+        name="Remove nginx default site",
+        path="/etc/nginx/sites-enabled/default",
+        present=False,
+    )
+
+In this case when the ``files.file`` operation is executed pyinfra will check if the file is present and remove it if so, and do nothing if not.
+
+Checking Operation Changes
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. Caution::
+    Always use the ``_if`` global argument when checking for previous operation changes.
+
+Let's use a simple example as above with add a conditional reload based on the outcome of the ``files.file`` operation:
+
+.. code:: python
+
+    from pyinfra import facts, host
+    from pyinfra.operations import apt, files, server
+
+    apt.packages(
+        name="Install nginx",
+        packages=["nginx"],
+    )
+
+    remove_default_site = files.file(
+        name="Remove nginx default site",
+        path="/etc/nginx/sites-enabled/default",
+        present=False,
+    )
+
+    if remove_default_site.changed:
+        server.service(
+            name="Reload nginx",
+            service="nginx",
+            reloaded=True,
+        )
+
+As above, the problem here is again the conditional check:
+
+.. code:: python
+
+    if remove_default_site.changed:
+
+Since this gets executed before nginx is installed by ``apt.packages`` operation, the value of ``remove_default_site.changed`` at this stage is ``False`` but at execution time this would become ``True``, exactly like the fact example above. The solution here is to use the ``_if`` global argument to delay the check until execution time:
+
+.. code:: python
+
+    from pyinfra import facts, host
+    from pyinfra.operations import apt, files, server
+
+    apt.packages(
+        name="Install nginx",
+        packages=["nginx"],
+    )
+
+    remove_default_site = files.file(
+        name="Remove nginx default site",
+        path="/etc/nginx/sites-enabled/default",
+        present=False,
+    )
+
+    server.service(
+        name="Reload nginx",
+        service="nginx",
+        reloaded=True,
+        _if=remove_default_site.did_change,
+    )
+
+=== /Users/harry/Code/pyinfra/docs/examples.rst ===
+Example Deploys
+===============
+
+This content has been moved to `the examples GitHub repository <https://github.com/pyinfra-dev/pyinfra-examples>`_.
+
+=== /Users/harry/Code/pyinfra/docs/examples/client_side_assets.md ===
+# Client Side Assets
+
+Often projects need to pre-compile assets at or just before deploy time to be uploaded to the remote host. The `config.py` file is a perfect place to perform this kind of thing as it will be loaded once and before any remote connections are made.
+
+```py
+# config.py
+
+from pyinfra import local, logger
+
+logger.info('Running yarn install & build')
+
+local.shell('yarn install')
+local.shell('yarn run build')
+```
+
+Simply place this ``config.py`` alongside your deploys and pyinfra will pick it up.
+
+=== /Users/harry/Code/pyinfra/docs/examples/data_multiple_environments.md ===
+# Data Across Multiple Environments
+
+Let's say you have an app that you wish to deploy in two environments: staging and production, with the dev VM as the default. A good layout for this would be:
+
++ ``deploy.py``
++ ``inventories/production.py`` - production inventory
++ ``inventories/staging.py`` - staging inventory
++ ``group_data/all.py`` - shared data
++ ``group_data/production.py`` - production data
++ ``group_data/staging.py`` - staging data
+
+The "all" group data contains any shared info and defaults:
+
+```py
+# group_data/all.py
+
+env = 'dev'
+git_repo = 'https://github.com/Fizzadar/pyinfra'
+```
+
+And the production/staging data describe the differences:
+
+```py
+# group_data/production.py
+
+env = 'production'
+git_branch = 'master'
+```
+
+```py
+# group_data/staging.py
+
+env = 'staging'
+git_branch = 'develop'
+```
+
+For more information on inventory files, see :doc:`inventory-data`.
+
+
+=== /Users/harry/Code/pyinfra/docs/examples/dynamic_execution_deploy.md ===
+# Dynamic Execution during Deploy
+
+**Note:** this example is out of date (the code is valid, but there's better ways to do it), please see [using operations: operation output & callbacks](/using-operations).
+
+pyinfra is designed around the idea of defining the end-state _before_ executing any changes on the remote server. Generally this works well, but sometimes you need the output of one command to feed into another. This can be achieved by executing Python functions mid-deploy.
+
+In this example we install a service (ZeroTier) that generates a random ID for the remote host. We then use this ID to authenticate the server with the ZeroTier API.
+
+```py
+import requests
+
+from pyinfra.operations import apt, python, server
+
+# Assumes the repo is configured/apt is updated
+apt.packages(
+    name='Install ZeroTier',
+    packages=['zerotier-one'],
+)
+
+def authorize_server(state, host):
+    # Run a command on the server and collect status and command output
+    status, output = host.run_shell_command('cat /var/lib/zerotier-one/identity.public')
+    assert status is True  # ensure the command executed OK
+
+    # First line of stdout is the identity
+    server_id = output.stdout_lines[0]
+
+    # Authorize via the ZeroTier API
+    response = requests.post('https://my.zerotier.com/.../{0}'.format(server_id))
+    response.raise_for_status()
+
+python.call(
+    name='Authorize the server on ZeroTier',
+    function=authorize_server,
+)
+
+server.shell(
+    name='Execute some shell',
+    commands=['echo "back to other operations!"'],
+)
+```
+
+=== /Users/harry/Code/pyinfra/docs/examples/dynamic_inventories_data.md ===
+# Dynamic Inventories & Data
+
+One of the biggest features of pyinfra is that it's configured in regular Python. This means inventory, data and deploy files can use Python code and modules. As a result it is possible to generate inventory and group data for a deploy.
+
+For example, here we fetch the list of target hosts from some internal inventory API:
+
+```py
+# inventory.py
+
+import requests
+
+def get_servers():
+    db = []
+    web = []
+
+    servers = requests.get('inventory.mycompany.net/api/v1/app_servers').json()
+
+    for server in servers:
+        if server['group'] == 'db':
+            db.append(server['hostname'])
+
+        elif server['group'] == 'web':
+            web.append(server['hostname'])
+
+    return db, web
+
+
+db_servers, web_servers = get_servers()
+```
+
+Like the dynamic inventory, we can use Python inside group data. It is also possible to access the initial inventory (without group data):
+
+```py
+# group_data/all.py
+
+from pyinfra import inventory
+
+master_db_server = inventory.db_servers[0].name
+```
+
+```py
+# group_data/web_servers.py
+
+db_user = 'username'
+```
+
+=== /Users/harry/Code/pyinfra/docs/examples/groups_roles.md ===
+# Groups & Roles
+
+Deploying complex projects usually involves multiple groups of servers, for example database & web servers. It is useful to separate the deploy into multiple files.
+
+These can be included within deploys using the ``pyinfra.local`` module. A list of hosts can be passed in to limit the include to those hosts.
+
+```py
+# deploy.py
+
+from pyinfra import host, local
+from pyinfra.operations import server
+
+# Include the web role for the web group
+if 'web_servers' in host.groups:
+    local.include('tasks/web.py')
+
+# And the same for the database role
+if 'db_servers' in host.groups:
+    local.include('tasks/database.py')
+
+# This operation runs on all the hosts
+server.shell('Runs everywhere')
+```
+
+```py
+# inventory.py
+
+web_servers = ['web1', 'web2', 'web3']
+db_servers = ['db1', 'db2', 'db3']
+```
+
+```py
+# tasks/web.py
+
+from pyinfra.operations import server
+
+server.shell('install webserver')
+...
+```
+
+```py
+# tasks/database.py
+
+from pyinfra.operations import server
+
+server.shell('install dbserver')
+...
+```
+
+=== /Users/harry/Code/pyinfra/docs/examples/secret_storage.md ===
+# Using Secrets in pyinfra
+
+Encrypting sensitive information can be achieved using Python packages such as [privy](https://pypi.org/project/privy/).
+
+```py
+# group_data/all.py
+
+from getpass import getpass
+
+import privy
+
+def get_secret(encrypted_secret):
+    password = getpass('Please provide the secret password: ')
+    return privy.peek(encrypted_secret, password)
+
+my_secret = get_secret('encrypted-secret-value')
+```
+
+An alternative might use an environment variable for the password:
+
+```py
+import os
+
+import privy
+
+def get_secret(encrypted_secret):
+    password = os.environ['TOP_SECRET_PASSWORD']
+    return privy.peek(encrypted_secret, password)
+```
+
+=== /Users/harry/Code/pyinfra/docs/facts.rst ===
+Facts Index
+===========
+
+.. raw:: html
+
+  <nav class="under-title-tabs">
+    See also:
+    <a href="operations.html">Operations Index</a>
+    <a href="connectors.html">Connectors Index</a>
+  </nav>
+
+pyinfra uses **facts** to determine the existing state of a remote server. Operations use this information to generate commands which alter the state. Facts are read-only and are populated at the beginning of the deploy.
+
+Facts can be executed/tested via the command line:
+
+.. code:: sh
+
+    # Example how to get multiple facts from a server myhost.com
+    pyinfra myhost.com fact server.Date server.Hostname ...
+
+If you want to pass an argument to a fact, pass it with ``key=value``. For example:
+
+.. code:: sh
+
+    # See if the package 'openssh-server' is installed servers myhost.com and myhost2.com
+    pyinfra myhost.com,myhost2.com fact deb.DebPackage name=openssh-server
+
+Multiple facts with arguments may be called like so:
+
+.. code:: sh
+
+    pyinfra @local fact files.File path=setup.py files.File path=anotherfile.txt
+
+You can leverage facts within :doc:`operations <using-operations>` like this:
+
+.. code:: py
+
+    from pyinfra import host
+    from pyinfra.facts.server import LinuxName
+
+    if host.get_fact(LinuxName) == 'Ubuntu':
+        apt.packages(...)
+
+**Want a new fact?** Check out :doc:`the writing facts guide <./api/operations>`.
+
+.. raw:: html
+
+        <div class="container my-4">
+          <!-- Dropdown Filter -->
+          <div class="mb-4">
+            <label for="tag-dropdown" class="form-label">Filter by Tag:</label>
+            <select class="form-select" id="tag-dropdown">
+	      <option value="All">All</option>
+{% for tag in tags %}
+              <option value="{{ tag.title_case }}">{{ tag.title_case }}</option>
+{% endfor %}
+            </select>
+          </div>
+
+          <!-- Cards Grid -->
+          <div class="row" id="card-container">
+{% for plugin in fact_plugins %}
+            <div class="col-md-4 mb-4 card-item">
+              <div class="card h-100">
+                <div class="card-body">
+                  <h5 class="card-title">
+                    <a href="./facts/{{ plugin.name }}.html">
+                      {{ plugin.name }}
+                    </a>
+                  <p class="card-text">{{ plugin.description }}</p>
+{% for tag in plugin.tags %}
+                  <span class="badge bg-secondary">{{ tag.title_case }}</span>
+{% endfor %}
+                </div>
+              </div>
+            </div>
+{% endfor %}
+          </div>
+        </div>
+        <script>
+          document.getElementById('tag-dropdown').addEventListener('change', function () {
+            const selectedTag = this.value;
+            const cards = document.querySelectorAll('.card-item');
+
+            cards.forEach(card => {
+              const tags = Array.from(card.querySelectorAll('.badge')).map(badge => badge.textContent.trim());
+
+              if (selectedTag === 'All' || tags.includes(selectedTag)) {
+                card.style.display = 'block';
+              } else {
+                card.style.display = 'none';
+              }
+            });
+          });
+        </script>
+
+.. toctree::
+   :maxdepth: 2
+   :glob:
+   :hidden:
+
+   facts/*
+
+=== /Users/harry/Code/pyinfra/docs/faq.rst ===
+.. meta::
+    :description: Frequently asked pyinfra questions
+    :keywords: pyinfra, documentation, faq
+
+
+Frequently Asked Questions
+==========================
+
+How do I get the name of the current host?
+------------------------------------------
+
+The currently executing host can be fetched from the ``host`` context variable. If you need the hostname the ``server.Hostname`` fact can be used to get that:
+
+.. code:: python
+
+    # Get the name of the host as defined in the inventory
+    from pyinfra import host
+    name = host.name
+
+    # Get the actual current hostname from the host
+    from pyinfra.facts.server import Hostname
+    hostname = host.get_fact(Hostname)
+    print(f"hostname:{hostname}")
+
+How do I use sudo in an operation?
+----------------------------------
+
+Sudo is controlled by one of the :ref:`privilege and user escalation arguments <arguments#privilege-user-escalation>`_, there are a number of additional arguments to control sudo execution:
+
+.. code:: python
+
+    from pyinfra.operations import apt
+    apt.packages(
+        packages=["iftop"],
+        _sudo=True,
+        _sudo_user="someuser",    # sudo to this user
+        _use_sudo_login=True,     # use a login shell when sudo-ing
+        _preserve_sudo_env=True,  # preserve the environment when sudo-ing
+    )
+
+How do I chmod or chown a file/directory/link?
+----------------------------------------------
+
+Use the LINK ``files.file``, ``files.directory`` or ``files.link`` operations to set the permissions and ownership of files, directories & links:
+
+.. code:: python
+
+    from pyinfra.operations import files
+    files.file(
+        path="/etc/default/elasticsearch",
+        user="pyinfra",
+        group="pyinfra",
+        mode=644,
+    )
+
+How do I handle unreliable operations or network issues?
+--------------------------------------------------------
+
+Use the :ref:`retry behavior arguments <arguments#retry-behavior>`_ to automatically retry failed operations. This is especially useful for network operations or services that may be temporarily unavailable:
+
+.. code:: python
+
+    from pyinfra.operations import server
+    # Retry a network operation up to 3 times
+    server.shell(
+        name="Download file with retries",
+        commands=["wget https://example.com/file.zip"],
+        _retries=3,
+        _retry_delay=5,  # wait 5 seconds between retries
+    )
+
+    # Use custom retry logic for specific error conditions
+    def should_retry_download(output_data):
+        # Retry only on temporary network errors, not permanent failures
+        stderr_text = " ".join(output_data["stderr_lines"]).lower()
+        temporary_errors = ["timeout", "connection refused", "temporary failure"]
+        return any(error in stderr_text for error in temporary_errors)
+
+    server.shell(
+        name="Download with smart retry logic",
+        commands=["wget https://example.com/large-file.zip"],
+        _retries=3,
+        _retry_until=should_retry_download,
+    )
+
+=== /Users/harry/Code/pyinfra/docs/getting-started.rst ===
+Getting Started
+===============
+
+This guide should help describe the basics of deploying stuff with pyinfra. Start by installing pyinfra with `uv <https://docs.astral.sh/uv/>`_ (see :doc:`full install instructions <./install>`):
+
+.. code:: bash
+
+    uv tool install pyinfra
+
+To do something with pyinfra you need two things:
+
+:doc:`Inventory <./inventory-data>`:
+    Hosts, groups and data. Hosts are targets for pyinfra to execute commands or state changes (server via SSH, container via Docker, etc). Hosts can be assigned to groups, and data can then be assigned to both groups and individual hosts.
+
+:doc:`Operations <./using-operations>`:
+    Commands to execute or state to apply to the target hosts in the inventory. These can be simple shell commands *"execute the uptime command"* or state definitions *"ensure the iftop apt package is installed"*.
+
+    State definition operations will not make changes unless required by diff-ing the target state against the state of the operation.
+
+Ad-hoc commands with pyinfra
+--------------------------------
+
+You can start pyinfra immediately with some ad-hoc command execution. The CLI always takes arguments in order ``INVENTORY`` then ``OPERATIONS``. You can target a SSH server, Docker container or the local machine for quick testing:
+
+.. code:: shell
+
+    pyinfra INVENTORY OPERATIONS...
+
+    # Execute over SSH
+    pyinfra my-server.net exec -- echo "hello world"
+
+    # Execute over SSH with options
+    pyinfra localhost --ssh-port 2222 --ssh-user vagrant exec -- echo "hello world"
+
+    # Execute within a new docker container
+    pyinfra @docker/ubuntu:22.04 exec -- echo "hello world"
+
+    # Execute on the local machine (MacOS/Linux only - for now)
+    pyinfra @local exec -- echo "hello world"
+
+When you run this pyinfra connects (or spins up a container), runs the echo command and prints the output. The :doc:`CLI page <./cli>` contains more :ref:`examples of ad-hoc commands <cli:Ad-hoc command execution>`.
+
+State definitions
+-----------------
+
+Operations can be used to define the desired state of target hosts. pyinfra will then determine what, if any, changes need to be made and apply them. This means that when you run these operations for a second time, pyinfra won't need to do do anything because the target is already up to date.
+
+.. code:: shell
+
+    # Ensure a package is installed on a Centos 8 instance
+    pyinfra my-server.net dnf.packages vim
+
+    # Stop a service on a remote host over SSH
+    pyinfra my-server.net init.systemd httpd running=False _sudo=True
+
+In this case you can re-run the above commands and the second time pyinfra will report no changes need to be made.
+
+.. admonition:: Note for Docker users
+    :class: note
+
+    When using ``@docker/IMAGE`` syntax, pyinfra will use a new container each run (meaning there will always be changes). You can use the image from the first run in the second (``@docker/IMAGEID``) to test the state change handling.
+
+Create a Deploy
+---------------
+
+A deploy is a collection of inventories and operations defined in Python files. These deploys can be saved and reused (committed to git, etc). Think of a deploy like Ansible's playbook or Chef's cookbook.
+
+To get started create an ``inventory.py`` containing our hosts to target:
+
+.. code:: python
+
+     # Define a group as a list of hosts
+     my_hosts = [
+        # vagrant instance
+        ("ubuntu2204", {
+           "ssh_port": 2222,
+           "ssh_hostname": "localhost",
+           "ssh_user": "vagrant",
+           "_sudo": True
+        }),
+       "my-server.net",
+       "@docker/ubuntu:22.04"
+     ]
+
+
+Now create a ``deploy.py`` containing our operations to execute:
+
+.. code:: python
+
+    from pyinfra.operations import apt, server
+
+    # Define some state - this operation will do nothing on subsequent runs
+    apt.packages(
+        name="Ensure the vim apt package is installed",
+        packages=["vim"],
+        update=True,
+    )
+
+This can now be executed like this:
+
+.. code:: shell
+
+    pyinfra inventory.py deploy.py
+
+That's the basics of pyinfra!
+
+Some good next steps:
+
++ :doc:`using-operations`
++ :doc:`inventory-data`
++ :doc:`arguments`
++ :doc:`cli`
++ :doc:`examples`
+
+=== /Users/harry/Code/pyinfra/docs/index.rst ===
+.. meta::
+    :description: Documentation for pyinfra
+    :keywords: pyinfra, documentation, configuration, management, infrastructure
+
+
+pyinfra Documentation
+=========================
+
+Welcome to the pyinfra v3 documentation. If you're new to pyinfra you should start with the :doc:`getting-started` page.
+
+
+Using pyinfra
+-------------
+
+.. compound::
+    :doc:`getting-started`
+        Start here! The quickest way to learn the basics of pyinfra and get started.
+
+.. compound::
+    :doc:`using-operations`
+        The guide to writing reusable, committable operations in Python files.
+
+.. compound::
+    :doc:`inventory-data`
+        Use groups, host, and group data to control and configure operations for any environment.
+
+.. compound::
+    :doc:`arguments`
+        Arguments available in all operations & facts such as ``_sudo``, ``_serial`` and ``_env``.
+
+.. compound::
+    :doc:`cli`
+        The pyinfra CLI is extremely powerful for ad hoc command execution and management.
+
+.. compound::
+    :doc:`faq`
+        Quick answers to the most commonly asked questions for using pyinfra.
+
+
+Deploy Reference
+----------------
+
+.. compound::
+    :doc:`operations`
+        A list of all available operations and their arguments, e.g. ``apt.packages``.
+
+.. compound::
+    :doc:`facts`
+        A list of all facts pyinfra can gather from hosts, e.g. ``server.Hostname``.
+
+.. compound::
+    :doc:`connectors`
+        A list of connectors to target different hosts such as ``@docker``, ``@local`` and ``@terraform``.
+
+
+How pyinfra Works
+-----------------
+
+.. compound::
+    :doc:`deploy-process`
+        Discover how pyinfra orders, diffs and executes operations against target hosts.
+
+.. compound::
+    :doc:`api/deploys`
+        How to package, redistribute and share pyinfra deploys as Python packages.
+
+.. compound::
+    :doc:`api/connectors`
+        How to write your own connectors for pyinfra.
+
+.. compound::
+    :doc:`api/operations`
+        How to write your own operations for pyinfra.
+
+.. compound::
+    :doc:`api/facts`
+        How to write your own facts for pyinfra.
+
+.. compound::
+    :doc:`api/index`
+        How to use the pyinfra API.
+
+
+.. toctree::
+    :hidden:
+    :caption: Using pyinfra
+
+    getting-started
+    using-operations
+    inventory-data
+    arguments
+    cli
+    faq
+
+.. toctree::
+    :hidden:
+    :maxdepth: 1
+    :caption: Deploy Reference
+
+    operations
+    facts
+    connectors
+
+.. toctree::
+    :hidden:
+    :caption: How pyinfra Works
+
+    deploy-process
+    api/deploys
+    api/operations
+    api/facts
+    api/connectors
+    api/index
+
+.. toctree::
+    :hidden:
+    :caption: Meta
+
+    support
+    contributing
+    compatibility
+    performance
+    changes
+    api/reference
+
+=== /Users/harry/Code/pyinfra/docs/install.md ===
+---
+# Ignore warning about this page not being included in any toctree
+orphan: true
+---
+
+# Installation
+
+## Prerequisites
+
+### Python Version Requirements
+
+- Python 3.9 or later is required
+- pyinfra 3.2+ supports Python 3.9, 3.10, 3.11, and 3.12
+- You can check your Python version with:
+
+  ```sh
+  python --version
+  ```
+
+### System Requirements
+
+- A Unix-like operating system (Linux, macOS) or Windows
+- Shell access to target systems
+- For Windows users: Administrator privileges for installation
+- For development: A C++ compiler may be required for some Python packages
+
+## Installation Method
+
+### Using uv (Recommended)
+
+First install [uv](https://docs.astral.sh/uv/getting-started/installation/) if you haven't already.
+
+Now you can install pyinfra as a tool, or add it to your project's dependencies.
+
+#### Installing pyinfra as a tool
+
+   ```sh
+   # install pyinfra
+   uv tool install pyinfra
+   
+   # verify installation
+   pyinfra --version
+   ```
+
+#### Adding pyinfra to your project dependencies
+
+   ```sh
+   # add pyinfra to your project dependencies
+   uv add pyinfra
+   
+   # verify installation
+   uv run pyinfra --version
+   ```
+
+### Using pipx
+
+First install [pipx](https://pipx.pypa.io/stable/installation/) if you haven't already.
+
+#### Install pyinfra
+
+   ```sh
+   pipx install pyinfra
+   ```
+
+#### Verify Installation
+
+   ```sh
+   pyinfra --version
+   ```
+
+### Using pip
+
+#### Create a Virtual Environment (Best Practice)
+
+   ```sh
+   # Create a virtual environment
+   python -m venv env
+
+   # Activate the virtual environment
+   # On macOS/Linux
+   source env/bin/activate
+   # On Windows
+   env\Scripts\activate
+   ```
+
+#### Install pyinfra
+
+   ```sh
+   pip install pyinfra
+   ```
+
+#### Verify Installation
+
+   ```sh
+   pyinfra --version
+   ```
+
+## Platform-Specific Instructions
+
+### Windows Installation
+
+#### Install Python
+
+- Download from [Python's official website](https://www.python.org/downloads/windows/)
+- Run installer as Administrator
+- Check "Add Python to PATH" during installation
+
+#### Optional: Install C++ Compiler
+
+- Download [Visual Studio Community Edition](https://visualstudio.microsoft.com/downloads/)
+- Select "Desktop development with C++" workload
+- Required components:
+  - MSVC v142...
+  - Windows 10 SDK...
+  - C++ CMake tools for Windows
+  - C++ ATL for latest...
+  - C++/CLI support for v142...
+  - C++ Modules for v142...
+
+#### Install pyinfra
+
+   ```sh
+   python -m venv env
+   env\Scripts\activate
+   pip install pyinfra
+   ```
+
+## Best Practices
+
+### Do's
+
+- ✅ Use virtual environments for isolation
+- ✅ Keep pyinfra and dependencies up-to-date
+- ✅ Use the latest Python version supported
+- ✅ Install as a regular user (not root/sudo)
+
+### Don'ts
+
+- ❌ Avoid system-wide installation
+- ❌ Don't mix pyinfra with other projects in the same virtual environment
+- ❌ Don't use unsupported package managers (poetry, pip-tools)
+
+## Troubleshooting
+
+### Common Issues
+
+#### Permission Errors
+
+- Ensure you're not using sudo for installation
+- Check virtual environment permissions
+- Verify Python installation directory permissions
+
+#### Python Version Issues
+
+- Verify Python version meets requirements
+- Consider using pyenv or similar version manager
+
+#### Virtual Environment Issues
+
+- Ensure virtual environment is properly activated
+- Check PATH environment variable
+- Verify Python interpreter location
+
+## Updating pyinfra
+
+To update to the latest version:
+
+```sh
+pip install --upgrade pyinfra
+```
+
+=== /Users/harry/Code/pyinfra/docs/inventory-data.rst ===
+Inventory & Data
+================
+
+.. admonition:: What is inventory?
+    :class: tip
+
+    A pyinfra inventory contains hosts, groups and data. Hosts are where pyinfra will make changes (a server via SSH, a Docker container or the local machine). Groups are collections of one or more host. Data can be assigned to both groups and hosts.
+
+Inventory Files
+---------------
+
+Inventory files contain groups of hosts. Groups are defined as a ``list`` or ``tuple``. For example, this inventory creates two groups, ``app_servers`` and ``db_servers``. Note that group names cannot start ``_``:
+
+.. code:: python
+
+    app_servers = [
+        "app-1.net",
+        "app-2.net"
+    ]
+
+    db_servers = (["db-1.net", "db-2.net", "db-3.net",], {})
+
+If you save this file as ``inventory.py``, you can then use it when executing pyinfra:
+
+.. code:: shell
+
+    pyinfra inventory.py OPERATIONS...
+
+.. admonition:: Autogenerated Groups
+    :class: note
+
+    A special group, ``all``, will contain every host from the inventory file (whatever the file is called).
+
+    All the hosts are added to a group with the name of the inventory file (eg any hosts defined in ``inventories/production.py`` belong to group ``production``).
+
+.. admonition:: inventories/
+    :class: note
+
+    Files in the ``inventories/`` directory are not automatically joined during inventory processing, rather this directory is a convention when wanting
+    to store multiple related inventories. Code can be imported from files under ``inventories/`` in to the main ``inventory.py`` if desired.
+
+
+Host Data
+~~~~~~~~~
+
+Data can be assigned to individual hosts in the inventory by using a tuple ``(hostname, data_dict)``:
+
+.. code:: python
+
+    app_servers = [
+        ("app-1.net", {"install_postgres": False}),
+        ("db-1.net", {"install_postgres": True}),
+    ]
+
+This data can then be used in operations:
+
+.. code:: python
+
+    from pyinfra import host
+
+    if host.data.get("install_postgres"):
+        apt.packages(
+            packages=["postgresql-server"],
+        )
+
+Host Name
+~~~~~~~~~
+
+The name of the host can be accessed via the ``pyinfra.host.name`` attribute:
+
+.. code:: python
+
+    from pyinfra import host
+
+    print(host.name)  # prints "app-1.net" for example
+
+Groups
+------
+
+It is often useful to access the list of groups a host belongs to in operation code, this can be done via the ``pyinfra.host.groups`` attribute:
+
+.. code:: python
+
+    from pyinfra import host
+
+    if "app_servers" in host.groups:
+        server.shell(...)
+
+Group Data Files
+~~~~~~~~~~~~~~~~
+
+Group data can be stored in separate files under the ``group_data`` directory (there's also a ``--group-data $DIR`` flag). Files will be loaded that match ``group_data/<group_name>.py``, and all hosts in any matching group will receive variables defined in the file as data:
+
+.. code:: python
+
+    app_user = "myuser"
+    app_dir = "/opt/pyinfra"
+
+These variables can then be used in operations:
+
+.. code:: python
+
+    from pyinfra import host
+
+    git.repo(
+        src="git@github.com:Fizzadar/pyinfra.git",
+        dest=host.data.app_dir,
+        user=host.data.app_user,
+    )
+
+.. Note::
+    The ``group_data`` directory is relative to the current working directory. This can be changed at runtime via the ``--chdir`` flag.
+
+Data Hierarchy
+--------------
+
+The same keys can be defined for host and group data - this means we can set a default in ``all.py`` and override it on a group or host basis. When accessing data, the first match in the following is returned:
+
++ "Override" data passed in via CLI args
++ Host data as defined in the inventory file
++ Normal group data
++ ``all`` group data
+
+.. Note::
+    pyinfra contains a ``debug-inventory`` command which can be used to explore the data output per-host for a given inventory/deploy, ie ``pyinfra inventory.py debug-inventory``.
+
+Connecting with Data
+--------------------
+
+Data can be used to configure connectors. For example, setting SSH connection details can be done like so:
+
+.. code:: python
+
+    ssh_user = "ubuntu"
+    ssh_key = "~/.ssh/some_key"
+    ssh_key_password = "password for key"
+
+The :doc:`connectors` contains full details of which data keys are available in each connector.
+
+Global Arguments with Data
+--------------------------
+
+Data can also provide default values for :doc:`arguments`, for example:
+
+.. code:: python
+
+    _sudo = True
+    _sudo_user = "pyinfra"
+
+This can be set during a deploy by updating `host.data`:
+
+.. code:: python
+
+  host.data._sudo_user = 'apache'
+
+
+External Sources for Data
+-------------------------
+
+Because pyinfra is configured in Python, you can pull in data from pretty much anywhere just using other Python packages.
+
+=== /Users/harry/Code/pyinfra/docs/operations.rst ===
+Operations Index
+================
+
+.. raw:: html
+
+  <nav class="under-title-tabs">
+    See also:
+    <a href="facts.html">Facts Index</a>
+    <a href="connectors.html">Connectors Index</a>
+  </nav>
+
+Operations are used to describe changes to make to systems in the inventory. Use them to define state and pyinfra will make any necessary changes to reach that state. All operations accept a set of :doc:`global arguments <arguments>` and are grouped as Python modules.
+
+**Want a new operation?** Check out :doc:`the writing operations guide <./api/operations>`.
+
+.. raw:: html
+
+        <div class="container my-4">
+          <!-- Dropdown Filter -->
+          <div class="mb-4">
+            <label for="tag-dropdown" class="form-label">Filter by Tag:</label>
+            <select class="form-select" id="tag-dropdown">
+	      <option value="All">All</option>
+{% for tag in tags %}
+              <option value="{{ tag.title_case }}">{{ tag.title_case }}</option>
+{% endfor %}
+            </select>
+          </div>
+
+          <!-- Cards Grid -->
+          <div class="row" id="card-container">
+{% for plugin in operation_plugins %}
+            <div class="col-md-4 mb-4 card-item">
+              <div class="card h-100">
+                <div class="card-body">
+                  <h5 class="card-title">
+                    <a href="./operations/{{ plugin.name }}.html">
+                      {{ plugin.name }}
+                    </a>
+                  </h5>
+                  <p class="card-text">{{ plugin.description }}</p>
+{% for tag in plugin.tags %}
+                  <span class="badge bg-secondary">{{ tag.title_case }}</span>
+{% endfor %}
+                </div>
+              </div>
+            </div>
+{% endfor %}
+          </div>
+        </div>
+        <script>
+          document.getElementById('tag-dropdown').addEventListener('change', function () {
+            const selectedTag = this.value;
+            const cards = document.querySelectorAll('.card-item');
+
+            cards.forEach(card => {
+              const tags = Array.from(card.querySelectorAll('.badge')).map(badge => badge.textContent.trim());
+
+              if (selectedTag === 'All' || tags.includes(selectedTag)) {
+                card.style.display = 'block';
+              } else {
+                card.style.display = 'none';
+              }
+            });
+          });
+        </script>
+
+.. toctree::
+   :maxdepth: 2
+   :glob:
+   :hidden:
+
+   operations/*
+
+=== /Users/harry/Code/pyinfra/docs/performance.rst ===
+Performance
+===========
+
+One of the reasons pyinfra was started was performance of agent-less tools at the time. Here's the latest (2024) benchmarking for a few simple operations across three tools: pyinfra, Fabric & Ansible. Note here that while pyinfra acts more like Ansible (state management) it performs closer to Fabric (ad-hoc command execution):
+
+.. image:: static/performance.png
+    :width: 100%
+
+The source code for the tests is available `on GitHub <https://github.com/Fizzadar/pyinfra-performance>`_.
+
+=== /Users/harry/Code/pyinfra/docs/support.md ===
+# Help & Support
+
+Need a hand with using pyinfra or have some questions? You can find official pyinfra communities below:
+
++ Chat in [the `pyinfra` Matrix room](https://matrix.to/#/#pyinfra:matrix.org)
++ Ask questions on [Stack Overflow](https://stackoverflow.com/questions/tagged/pyinfra) (be sure to use the `pyinfra` tag!)
+
+## I think I've got a bug!
+
++ Please have a quick scan of the [compatibility page](./compatibility) to see if the issue is referenced there
++ Check [the issue list](https://github.com/Fizzadar/pyinfra/issues) to see if anyone else has this issue
++ Submit [a new bug report](https://github.com/Fizzadar/pyinfra/issues/new/choose)
+
+## I have an idea!
+
+Please consider [submitting a feature request](https://github.com/Fizzadar/pyinfra/issues/new/choose).
+
+## I'd like to contribute!
+
+Fantastic! Please see [the contributing docs](./contributing).
+
+=== /Users/harry/Code/pyinfra/docs/using-operations.rst ===
+Using Operations
+================
+
+.. admonition:: What are operations?
+    :class: tip
+
+    Operations tell pyinfra what to do, for example the ``server.shell`` operation instructs pyinfra to execute a shell command. Most operations define state rather than actions - so instead of *start this service* you say *this service should be running* - pyinfra will make changes if needed.
+
+For example, these two operations will ensure that user ``pyinfra`` exists with home directory ``/home/pyinfra``, and that the ``/var/log/pyinfra.log`` file exists and is owned by that user:
+
+.. code:: python
+
+    from pyinfra.operations import server, files
+
+    server.user(
+        name="Create pyinfra user",
+        user="pyinfra",
+        home="/home/pyinfra",
+    )
+
+    files.file(
+        name="Create pyinfra log file",
+        path="/var/log/pyinfra.log",
+        user="pyinfra",
+        group="pyinfra",
+        mode="644",
+    )
+
+
+Uses :doc:`operations/files` and :doc:`operations/server`. You can see all available operations in the :doc:`operations`. If you save the file as ``deploy.py`` you can test it out using Docker:
+
+.. code:: shell
+
+    pyinfra @docker/ubuntu:20.04 deploy.py
+
+Global Arguments
+----------------
+
+Global arguments are covered in detail here: :doc:`arguments`. There is a set of arguments available to all operations to control authentication (``_sudo``, etc) and operation execution (``_shell_executable``, etc):
+
+.. code:: python
+
+    from pyinfra.operations import apt
+
+    apt.update(
+        name="Update apt repositories",
+        _sudo=True,
+        _sudo_user="pyinfra",
+    )
+
+Retry Functionality
+-------------------
+
+Operations can be configured to retry automatically on failure using retry arguments:
+
+.. code:: python
+
+    from pyinfra.operations import server
+
+    # Retry a flaky command up to 3 times with default 5 second delay
+    server.shell(
+        name="Download file with retries",
+        commands=["curl -o /tmp/file.tar.gz https://example.com/file.tar.gz"],
+        _retries=3,
+    )
+
+    # Retry with custom delay between attempts
+    server.shell(
+        name="Check service status with retries",
+        commands=["systemctl is-active myservice"],
+        _retries=2,
+        _retry_delay=10,  # 10 second delay between retries
+    )
+
+    # Use custom retry condition to control when to retry
+    def retry_on_network_error(output_data):
+        # Retry if stderr contains network-related errors
+        for line in output_data["stderr_lines"]:
+            if any(keyword in line.lower() for keyword in ["network", "timeout", "connection"]):
+                return True
+        return False
+
+    server.shell(
+        name="Network operation with conditional retry",
+        commands=["wget https://example.com/large-file.zip"],
+        _retries=5,
+        _retry_until=retry_on_network_error,
+    )
+
+
+The ``host`` Object
+-------------------
+
+pyinfra provides a global ``host`` object that can be used to retrieve information and metadata about the current host target. At all times the ``host`` variable represents the current host context, so you can think about the deploy code executing on individual hosts at a time.
+
+The ``host`` object has ``name`` and ``groups`` attributes which can be used to control operation flow:
+
+.. code:: python
+
+    from pyinfra import host
+
+    if host.name == "control-plane-1":
+        ...
+
+    if "control-plane" in host.groups:
+        ...
+
+Host & Group Data
+~~~~~~~~~~~~~~~~~
+
+Adding data to inventories is covered in detail here: :doc:`inventory-data`. Data can be accessed within operations using the ``host.data`` attribute:
+
+.. code:: python
+
+    from pyinfra import host
+    from pyinfra.operations import server
+
+    # Ensure the state of a user based on host/group data
+    server.user(
+        name="Setup the app user",
+        user=host.data.app_user,
+        home=host.data.app_dir,
+    )
+
+
+Host Facts
+~~~~~~~~~~
+
+Facts allow you to use information about the target host to control and configure operations. A good example is switching between ``apt`` & ``yum`` depending on the Linux distribution. You can get a fact like this:
+
+.. code:: bash
+
+    pyinfra inventory.py fact server.LinuxName
+
+Facts are imported from ``pyinfra.facts.*`` and can be retrieved using the ``host.get_fact`` function. If you save this in a file called :file:`{nano}.py`:
+
+.. code:: python
+
+    from pyinfra import host
+    from pyinfra.facts.server import LinuxName
+    from pyinfra.operations import yum, apt
+
+    if host.get_fact(LinuxName) == "Fedora":
+        yum.packages(
+            name="Install nano via yum",
+            packages=["nano"],
+            _sudo=True
+        )
+    if host.get_fact(LinuxName) == "Ubuntu":
+        apt.packages(
+            name="Install nano via apt",
+            packages=["nano"],
+            update=True,
+            _sudo=True
+        )
+
+.. code:: bash
+
+    pyinfra inventory.py nano.py
+
+
+See :doc:`facts` for a full list of available facts and arguments.
+
+.. Important::
+    Only use immutable facts in deploy code (installed OS, Arch, etc) unless you are absolutely sure they will not change. See: :ref:`using host facts <deploy-process#using-host-facts>`_.
+
+Fact Errors
+^^^^^^^^^^^
+
+When facts fail due to an error the host will be marked as failed just as it would when an operation fails. This can be avoided by passing the ``_ignore_errors`` argument:
+
+.. code:: python
+
+    if host.get_fact(LinuxName, _ignore_errors=True):
+        ...
+
+The ``inventory`` Object
+------------------------
+
+Like ``host``, there is an ``inventory`` object that can be used to access the entire inventory of hosts. This is useful when you need facts or data from another host like the hostname of another server:
+
+.. code:: python
+
+    from pyinfra import inventory
+    from pyinfra.facts.server import Hostname
+    from pyinfra.operations import files
+
+    # Get the other host, load the hostname fact
+    db_host = inventory.get_host("postgres-main")
+    db_hostname = db_host.get_fact(Hostname)
+
+    files.template(
+        name="Generate app config",
+        src="templates/app-config.j2.yaml",
+        dest="/opt/myapp/config.yaml",
+        db_hostname=db_hostname,
+    )
+
+
+Change Detection
+----------------
+
+All operations return an operation meta object which provides information about the changes the operation *will* execute. This can be used to control other operations via the ``_if`` argument:
+
+.. code:: python
+
+    from pyinfra.operations import server
+
+    create_user = server.user(...)
+    create_otheruser = server.user(...)
+
+    server.shell(
+        name="Bootstrap myuser",
+        commands=["..."],
+        # Only execute this operation if the first user create executed any changes
+        _if=create_user.did_change,  # also: did_not_change, did_succeed, did_error
+    )
+
+    # A list can be provided to run an operation if **all** functions return true
+    server.shell(
+        commands=["echo 'Both myuser and otheruser changed'"],
+        _if=[create_user.did_change, create_otheruser.did_change],
+    )
+
+    # You can also build your own lamba functions to achieve, e.g. an OR condition
+    server.shell(
+        commands=["echo 'myuser or otheruser changed'"],
+        _if=lambda: create_user.did_change() or create_otheruser.did_change(),
+    )
+
+    # The functions `any_changed` and `all_changed` are provided for common use cases, e.g.
+    from pyinfra.operations.util import any_changed, all_changed
+    server.shell(commands=["..."], _if=any_changed(create_user, create_otheruser))
+    server.shell(commands=["..."], _if=all_changed(create_user, create_otheruser))
+
+Output & Callbacks
+------------------
+
+pyinfra doesn't immediately execute operations, meaning output is not available right away. It is possible to access this output at runtime by providing a callback function using the :ref:`operations:python.call` operation. Callback functions may also call other operations which will be immediately executed.
+Why/how this works :ref:`is described here <deploy-process#how-pyinfra-detects-changes-orders-operations>`_.
+
+.. code:: python
+
+    from pyinfra import logger
+    from pyinfra.operations import python, server
+
+    result = server.shell(
+        commands=["echo output"],
+    )
+    # result.stdout raises exception here, but works inside callback()
+
+    def callback():
+        logger.info(f"Got result: {result.stdout}")
+
+    python.call(
+        name="Execute callback function",
+        function=callback,
+    )
+
+
+There is also the possibility to use pyinfra's logging functionality which may be appropriate in certain situations.
+
+.. code:: python
+
+    from pyinfra import logger
+    def ufw_usable(function code here)
+    is_ufw_usable = ufw_usable()
+    logger.info('Checking output of ufw_usable: {}'.format(is_ufw_usable))
+
+
+Produces output similar to:
+
+.. code::
+
+    --> Preparing Operations...
+        Loading: deploy_create_users.py
+        Checking output of ufw_usable: None
+        [multitest.example.com] Ready: deploy_create_users.py
+
+
+Include Files
+-------------
+
+Including files can be used to break out operations across multiple files. Files can be included using ``local.include``.
+
+.. code:: python
+
+    from pyinfra import local
+
+    # Include & call all the operations in tasks/install_something.py
+    local.include("tasks/install_something.py")
+
+Additional data can be passed across files via the ``data`` param to parameterize tasks and is available in ``host.data``. For example :file:`tasks/{create_user}.py` could look like:
+
+.. code:: python
+
+    from getpass import getpass
+
+    from pyinfra import host
+    from pyinfra.operations import server
+
+    group = host.data.get("group")
+    user = host.data.get("user")
+
+    server.group(
+        name=f"Ensure {group} is present",
+        group=group,
+    )
+    server.user(
+        name=f"Ensure {user} is present",
+        user=user,
+        group=group,
+    )
+
+And and be called by other deploy scripts or tasks:
+
+.. code:: python
+
+    from pyinfra import local
+
+    for group, user in (("admin", "Bob"), ("admin", "Joe")):
+        local.include("tasks/create_user.py", data={"group": group, "user": user})
+
+See more in :doc:`examples: groups & roles <./examples/groups_roles>`.
+
+
+The ``config`` Object
+---------------------
+
+Like ``host`` and ``inventory``, ``config`` can be used to set global defaults for operations. For example, to use sudo in all following operations:
+
+.. code:: python
+
+    from pyinfra import config
+
+    config.SUDO = True
+
+    # all operations below will use sudo by default (unless overridden by `_sudo=False`)
+
+Enforcing Requirements
+~~~~~~~~~~~~~~~~~~~~~~
+
+The config object can be used to enforce a pyinfra version or Python package requirements. This can either be defined as a requirements text file path or simply a list of requirements.
+For example, if you create a :file:`{requirements}.py` file with:
+
+.. code:: python
+
+    # Require a certain pyinfra version
+    config.REQUIRE_PYINFRA_VERSION = "~=3.0"
+
+    # Require certain packages
+    config.REQUIRE_PACKAGES = "requirements.txt"  # path is relative to the current working directory
+    config.REQUIRE_PACKAGES = [
+        "pyinfra~=3.0",
+    ]
+
+And create a :file:`requirements.txt` file with something like this:
+
+.. code:: bash
+
+    pyinfra
+
+Then modify the :file:`{nano}.py` above to include these lines:
+
+.. code:: python
+
+    from pyinfra import local
+    local.include("requirements.py")
+
+
+Examples
+--------
+
+A great way to learn more about writing pyinfra deploys is to see some in action. Check out:
+
+- `the pyinfra examples repository on GitHub <https://github.com/pyinfra-dev/pyinfra-examples>`_
+
+=== /Users/harry/Code/pyinfra/docs/utils.py ===
+import re
+
+
+def title_line(char, string):
+    return "".join(char for _ in range(0, len(string)))
+
+
+def format_doc_line(line):
+    # Bold the <arg>: part of each line
+    line = re.sub(r"\+ ([0-9a-z_\/\*]+)(.*)", r"+ **\1**\2", line)
+
+    # Python's __doc__ attribute already dedents docstrings, so we don't need to strip anything
+    return line
+

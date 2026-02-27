@@ -10,5 +10,8 @@ result = subprocess.run(
 abigail_ip = result.stdout.strip()
 
 servers = [
-    (abigail_ip, {"ssh_user": "root"}),
+    (abigail_ip, {
+        "ssh_user": "root",
+        "redirect_url": "https://hakeemjeffries.com",
+    }),
 ]

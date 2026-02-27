@@ -58,7 +58,7 @@ files.put(
 
 # --- Sysctl hardening ---
 
-files.put(
+sysctl_config = files.put(
     name="Deploy sysctl hardening config",
     src="templates/99-hardening.conf",
     dest="/etc/sysctl.d/99-hardening.conf",
@@ -70,4 +70,35 @@ files.put(
 server.shell(
     name="Reload sysctl",
     commands=["sysctl --system"],
+    _if=sysctl_config.did_change,
+)
+
+# --- Caddy reverse proxy (HTTPS redirect) ---
+
+apt.packages(
+    name="Install Caddy",
+    packages=["caddy"],
+)
+
+caddyfile = files.template(
+    name="Deploy Caddyfile",
+    src="templates/Caddyfile.j2",
+    dest="/etc/caddy/Caddyfile",
+    user="root",
+    group="root",
+    mode="644",
+)
+
+systemd.service(
+    name="Reload Caddy",
+    service="caddy",
+    reloaded=True,
+    _if=caddyfile.did_change,
+)
+
+systemd.service(
+    name="Enable and start Caddy",
+    service="caddy",
+    running=True,
+    enabled=True,
 )

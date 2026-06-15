@@ -45,6 +45,18 @@ resource "digitalocean_droplet" "abigail" {
   ssh_keys = [data.digitalocean_ssh_key.this.id]
 }
 
+# zulu — general-purpose / "potpourri" droplet for miscellaneous services.
+# What it currently runs:
+#   - openprogress.us -> opi.us (301 permanent redirect, via Caddy)
+# (add new responsibilities to this list as they are deployed)
+resource "digitalocean_droplet" "zulu" {
+  name     = "zulu"
+  region   = "nyc3"
+  size     = "s-1vcpu-512mb-10gb"
+  image    = "debian-13-x64"
+  ssh_keys = [data.digitalocean_ssh_key.this.id]
+}
+
 resource "digitalocean_spaces_bucket" "this" {
   name   = "khanna-s3"
   region = "nyc3"
@@ -85,7 +97,23 @@ resource "digitalocean_record" "abigailspannberger_a" {
   value  = digitalocean_droplet.abigail.ipv4_address
 }
 
-output "ipv4_address" {
-  description = "Public IPv4 address of the droplet"
+resource "digitalocean_domain" "openprogress" {
+  name = "openprogress.us"
+}
+
+resource "digitalocean_record" "openprogress_a" {
+  domain = digitalocean_domain.openprogress.id
+  type   = "A"
+  name   = "@"
+  value  = digitalocean_droplet.zulu.ipv4_address
+}
+
+output "abigail_ipv4_address" {
+  description = "Public IPv4 address of the abigail droplet"
   value       = digitalocean_droplet.abigail.ipv4_address
+}
+
+output "zulu_ipv4_address" {
+  description = "Public IPv4 address of the zulu droplet"
+  value       = digitalocean_droplet.zulu.ipv4_address
 }

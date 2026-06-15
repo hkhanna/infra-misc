@@ -20,7 +20,7 @@ processors:
         value: caddy-redirect
         action: upsert
       - key: host.name
-        value: abigail
+        value: {{ host.data.hostname }}
         action: upsert
 
   batch:

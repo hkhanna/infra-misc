@@ -80,11 +80,11 @@ OTELCOL_VERSION = "0.146.1"
 server.shell(
     name="Install otelcol-contrib",
     commands=[
-        f"wget -q https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{OTELCOL_VERSION}/otelcol-contrib_{OTELCOL_VERSION}_linux_amd64.deb -O /tmp/otelcol-contrib.deb",
-        "dpkg -i /tmp/otelcol-contrib.deb",
-        "rm /tmp/otelcol-contrib.deb",
+        # Idempotent: skip the download/install if the target version is already present.
+        f"otelcol-contrib --version 2>/dev/null | grep -q '{OTELCOL_VERSION}' || "
+        f"(wget -q https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{OTELCOL_VERSION}/otelcol-contrib_{OTELCOL_VERSION}_linux_amd64.deb -O /tmp/otelcol-contrib.deb && "
+        "dpkg -i /tmp/otelcol-contrib.deb && rm /tmp/otelcol-contrib.deb)",
     ],
-    _if=f"! otelcol-contrib --version 2>/dev/null | grep -q '{OTELCOL_VERSION}'",
 )
 
 server.shell(
@@ -114,7 +114,7 @@ systemd.service(
     name="Restart otelcol-contrib",
     service="otelcol-contrib",
     restarted=True,
-    _if=lambda: otelcol_config.did_change or otelcol_env.did_change,
+    _if=lambda: otelcol_config.did_change() or otelcol_env.did_change(),
 )
 
 systemd.service(

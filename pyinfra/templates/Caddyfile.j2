@@ -1,8 +1,8 @@
-abigailspannberger.com {
+{{ host.data.redirect_domain }} {
 	log {
 		output stderr
 		format json
 	}
 
-	redir {{ host.data.redirect_url }}{uri}
+	redir {{ host.data.redirect_url }}{uri}{% if host.data.redirect_permanent %} permanent{% endif %}
 }

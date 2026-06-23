@@ -12,12 +12,13 @@ Design
   Ephemeral  : the GPU pod, created on demand and DELETED when you're done.
                The volume — and every model on it — survives, so restarts are
                instant and you pay $0 for GPU while it's off.
-  Frontend   : SillyTavern runs on YOUR laptop and connects to the pod's Ollama
-               (a RunPod pod is a single container, so we don't run ST on it).
+  Frontend   : Open WebUI runs on YOUR Mac (one `docker run`, pointed at the pod's Ollama
+               URL) — a RunPod pod is a single container, so the pod serves Ollama only.
+               `up` prints the exact docker command + URL.
 
 Daily workflow
 --------------
-  ./llm.py up                 # create the pod, print the Ollama URL for SillyTavern
+  ./llm.py up                 # create the pod; print the Ollama URL + local Open WebUI command
   ./llm.py status             # is a pod running? which GPU?
   ./llm.py down               # DELETE the pod (models preserved on the volume, GPU -> $0)
   ./llm.py destroy            # DELETE everything incl. the volume -> truly $0 (models lost)
@@ -39,7 +40,7 @@ Config (environment — e.g. `source ../.env`)
 --------------------------------------------
   RUNPOD_API_KEY    (required) runpodctl reads it from the env — `source .env` is enough to auth
   LLM_VOLUME_ID     (required for `up`)  output of create-volume
-  LLM_GPU           default "NVIDIA A40"        (48GB, runs 70B Q4; cheapest 48GB card)
+  LLM_GPU           default "NVIDIA A100-SXM4-80GB"  (80GB, reliably in stock; runs 70B easily)
   LLM_MODEL         default "hermes3:70b"       (auto-pulled on first `up` if missing)
   LLM_DATACENTER    optional — create-volume auto-picks an in-stock DC for LLM_GPU if unset
   LLM_VOLUME_SIZE   default "80"  GB            (create-volume)
@@ -55,10 +56,13 @@ import urllib.error
 import urllib.request
 
 POD_NAME = "muse"
-IMAGE = "ollama/ollama:latest"
-OLLAMA_PORT = 11434
+IMAGE = "ollama/ollama:latest"  # the pod serves Ollama only (this image is proven to boot on RunPod)
+OLLAMA_PORT = 11434             # Ollama API — Open WebUI (running on your Mac) connects here
 VOLUME_MOUNT = "/root/.ollama"  # ollama stores models here -> persisted on the volume
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pod-id")
+
+# RunPod's proxy (Cloudflare) returns 403 for the default "Python-urllib" User-Agent; send a normal one.
+USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
 
 
 # --- helpers -----------------------------------------------------------------
@@ -130,15 +134,20 @@ def _pod_exists(pod_id):
     return r.returncode == 0 and pod_id in r.stdout
 
 
-def proxy_base(pod_id):
+def proxy_url(pod_id, port):
     # RunPod exposes an http port at https://<pod_id>-<port>.proxy.runpod.net
-    return f"https://{pod_id}-{OLLAMA_PORT}.proxy.runpod.net"
+    return f"https://{pod_id}-{port}.proxy.runpod.net"
+
+
+def proxy_base(pod_id):
+    return proxy_url(pod_id, OLLAMA_PORT)
 
 
 def ollama_request(pod_id, path, method="GET", body=None, stream=False, timeout=60):
     url = proxy_base(pod_id) + path
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("User-Agent", USER_AGENT)
     if data:
         req.add_header("Content-Type", "application/json")
     resp = urllib.request.urlopen(req, timeout=timeout)
@@ -160,17 +169,25 @@ def require_running_pod():
     return pod_id
 
 
-def wait_for_ollama(pod_id, timeout=480):
-    print("waiting for Ollama to come online", end="", flush=True)
+def _http_ok(url, timeout=10):
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", USER_AGENT)
+    try:
+        urllib.request.urlopen(req, timeout=timeout)
+        return True
+    except (urllib.error.URLError, TimeoutError, ConnectionError):
+        return False
+
+
+def wait_for(label, url, timeout=900):
+    print(f"waiting for {label} to come online", end="", flush=True)
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            ollama_request(pod_id, "/api/tags", timeout=10)
+        if _http_ok(url):
             print(" ready.")
             return True
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ConnectionError):
-            print(".", end="", flush=True)
-            time.sleep(8)
+        print(".", end="", flush=True)
+        time.sleep(8)
     print()
     return False
 
@@ -209,61 +226,68 @@ def _pull(pod_id, model):
 # --- commands ----------------------------------------------------------------
 
 def cmd_up(args):
-    if read_pod_id():
-        die(f"a pod is already tracked ({read_pod_id()}); run `./llm.py down` first")
-
-    gpu = args.gpu or env("LLM_GPU", "NVIDIA A40")
+    gpu = args.gpu or env("LLM_GPU", "NVIDIA A100-SXM4-80GB")
     volume_id = env("LLM_VOLUME_ID", required=True)
     model = env("LLM_MODEL", "hermes3:70b")
 
-    # Guard: the volume is locked to one DC and the pod must run there. If LLM_GPU isn't in
-    # stock in that DC, fail early with guidance instead of a raw RunPod error. (--force skips it.)
-    if not args.force:
-        dc_data = _dc_list()
-        vdc = _volume_datacenter(volume_id, dc_data)
-        if vdc and not _gpu_in_stock_at(dc_data, vdc, gpu):
-            avail = _gpus_in_stock_at(dc_data, vdc)
-            here = ", ".join(avail) if avail else "(nothing in stock right now)"
-            die(f"'{gpu}' isn't in stock in your volume's data center ({vdc}) right now.\n"
-                f"  GPUs in stock in {vdc}: {here}\n"
-                f"Fix: set LLM_GPU to one of those, OR recreate the volume in a DC that has "
-                f"'{gpu}' (`./llm.py datacenters --gpu \"{gpu}\"`), OR re-run `up --force` to try anyway.")
+    pod_id = read_pod_id()
+    if pod_id:
+        # Resume an already-created pod (e.g. a previous `up` that timed out waiting for first boot).
+        print(f"pod {pod_id} already tracked — resuming setup (run `./llm.py down` to replace it).")
+    else:
+        # Guard: the volume is locked to one DC and the pod must run there. If LLM_GPU isn't in
+        # stock in that DC, fail early with guidance instead of a raw RunPod error. (--force skips it.)
+        if not args.force:
+            dc_data = _dc_list()
+            vdc = _volume_datacenter(volume_id, dc_data)
+            if vdc and not _gpu_in_stock_at(dc_data, vdc, gpu):
+                avail = _gpus_in_stock_at(dc_data, vdc)
+                here = ", ".join(avail) if avail else "(nothing in stock right now)"
+                die(f"'{gpu}' isn't in stock in your volume's data center ({vdc}) right now.\n"
+                    f"  GPUs in stock in {vdc}: {here}\n"
+                    f"Fix: set LLM_GPU to one of those, OR recreate the volume in a DC that has "
+                    f"'{gpu}' (`./llm.py datacenters --gpu \"{gpu}\"`), OR re-run `up --force` to try anyway.")
 
-    print(f"creating pod '{POD_NAME}' on {gpu} (Secure Cloud); volume {volume_id} -> {VOLUME_MOUNT} ...")
-    result = runpodctl([
-        "pod", "create",
-        "--name", POD_NAME,
-        "--image", IMAGE,
-        "--gpu-id", gpu,
-        "--gpu-count", "1",
-        "--cloud-type", "SECURE",            # network volumes require Secure Cloud
-        "--network-volume-id", volume_id,
-        "--volume-mount-path", VOLUME_MOUNT,
-        "--container-disk-in-gb", "20",      # models live on the volume, not here
-        "--ports", f"{OLLAMA_PORT}/http",
-        "--env", json.dumps({"OLLAMA_HOST": "0.0.0.0"}),
-    ])
-    pod_id = _find_id(result)
-    if not pod_id:
-        die(f"couldn't parse a pod id from runpodctl output:\n{result}")
-    write_pod_id(pod_id)
-    print(f"pod {pod_id} created.")
-
-    if not wait_for_ollama(pod_id):
-        die("Ollama did not come online in time — check `./llm.py status` / the RunPod console")
-
-    if model and not _has_model(pod_id, model):
-        print(f"default model '{model}' not on the volume yet — pulling it ...")
-        _pull(pod_id, model)
+        print(f"creating pod '{POD_NAME}' on {gpu} (Secure Cloud); volume {volume_id} -> {VOLUME_MOUNT} ...")
+        result = runpodctl([
+            "pod", "create",
+            "--name", POD_NAME,
+            "--image", IMAGE,
+            "--gpu-id", gpu,
+            "--gpu-count", "1",
+            "--cloud-type", "SECURE",            # network volumes require Secure Cloud
+            "--network-volume-id", volume_id,
+            "--volume-mount-path", VOLUME_MOUNT,
+            "--container-disk-in-gb", "20",      # models live on the volume, not here
+            "--ports", f"{OLLAMA_PORT}/http",
+            "--env", json.dumps({"OLLAMA_HOST": "0.0.0.0"}),
+        ])
+        pod_id = _find_id(result)
+        if not pod_id:
+            die(f"couldn't parse a pod id from runpodctl output:\n{result}")
+        write_pod_id(pod_id)
+        print(f"pod {pod_id} created.")
 
     base = proxy_base(pod_id)
-    print("\n" + "=" * 64)
-    print(f"  Ollama is up:  {base}")
-    print(f"  SillyTavern (local) -> API type: Ollama, URL: {base}")
+    if not wait_for("Ollama", base + "/api/tags"):
+        die("Ollama isn't reachable yet — first boot pulls the image, which can take a few minutes.\n"
+            "The pod is still running; just re-run `./llm.py up` to keep waiting (it resumes, won't recreate).")
+
+    if model and not _has_model(pod_id, model):
+        print(f"pulling default model '{model}' (tens of GB on first run) ...")
+        _pull(pod_id, model)
+
+    print("\n" + "=" * 72)
+    print(f"  Ollama API (on the pod):  {base}")
+    print(f"  Run the chat box locally (Docker on your Mac), pointed at the pod:\n")
+    print(f"    docker run -d -p 3000:8080 --name open-webui --restart unless-stopped \\")
+    print(f"      -e OLLAMA_BASE_URL={base} \\")
+    print(f"      -v open-webui:/app/backend/data ghcr.io/open-webui/open-webui:main\n")
+    print(f"  Then open http://localhost:3000, create an account, pick '{model}', and write.")
+    print(f"  (The pod URL changes each `up`; if Open WebUI is already running, update")
+    print(f"   OLLAMA_BASE_URL in it: Settings -> Admin Settings -> Connections.)")
     print(f"  Done writing?  ./llm.py down   (GPU billing stops)")
-    print("=" * 64)
-    print("\nNOTE: that URL is publicly reachable while the pod runs (Ollama has no auth).")
-    print("Keep the pod up only while writing. See README for SSH-tunnel hardening.")
+    print("=" * 72)
 
 
 def cmd_down(args):
@@ -458,7 +482,7 @@ def cmd_datacenters(args):
         for gid, locs in sorted(_in_stock_summary(data).items()):
             print(f"{gid:<44} {', '.join(locs)}")
         return
-    gpu = args.gpu or env("LLM_GPU", "NVIDIA A40")
+    gpu = args.gpu or env("LLM_GPU", "NVIDIA A100-SXM4-80GB")
     matches = _dcs_for_gpu(data, gpu)
     if matches:
         print(f"data centers with '{gpu}' in stock that support network volumes (best first):\n")
@@ -477,7 +501,7 @@ def cmd_datacenters(args):
 def cmd_create_volume(args):
     name = "llm-models"
     size = env("LLM_VOLUME_SIZE", "80")
-    gpu = env("LLM_GPU", "NVIDIA A40")
+    gpu = env("LLM_GPU", "NVIDIA A100-SXM4-80GB")
     dc = os.environ.get("LLM_DATACENTER")
     if not dc:
         matches = _dcs_for_gpu(_dc_list(), gpu)

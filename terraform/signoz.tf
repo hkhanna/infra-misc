@@ -263,6 +263,9 @@ resource "signoz_alert" "p95_latency" {
     compositeQuery = {
       queryType = "builder"
       panelType = "graph"
+      # duration_nano is nanoseconds; without this SigNoz can't scale the ms
+      # threshold to the series and the rule fires on any traffic.
+      unit = "ns"
       queries = [{
         type = "builder_query"
         spec = {
@@ -331,6 +334,9 @@ resource "signoz_alert" "p95_latency_override" {
     compositeQuery = {
       queryType = "builder"
       panelType = "graph"
+      # duration_nano is nanoseconds; without this SigNoz can't scale the ms
+      # threshold to the series and the rule fires on any traffic.
+      unit = "ns"
       queries = [{
         type = "builder_query"
         spec = {

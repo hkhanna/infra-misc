@@ -12,14 +12,29 @@
 # SIGNOZ_ENDPOINT env var in this repo already means the OTLP *ingest*
 # endpoint (used by the collectors), which is a different URL.
 #
-# Bootstrap: the notification channel is created by hand in the UI first —
-# the provider has no channel resource as of v0.0.14. Author the five rules
-# once in the UI (the query builder is the only reliable way to produce the
-# condition JSON), then adopt them with the import blocks at the bottom and
-# reconcile each `condition` below against `terraform state show`. The specs
-# here are best-effort starting points, not gospel. After adoption the UI is
-# read-only for these rules: edit here, plan, apply — a UI edit to a managed
-# rule is reverted on the next apply.
+# Bootstrap: the notification channel ("Slack") is created by hand in the UI —
+# the provider has no channel resource as of v0.0.14, and rules reference the
+# channel by exact name. The rules themselves are created directly by
+# `terraform apply`; no UI authoring or imports needed. After creation the UI
+# is read-only for these rules: edit here, plan, apply — a UI edit to a
+# managed rule is reverted on the next apply.
+#
+# Provider quirks (v0.0.14), learned the hard way:
+#  - On create, apply errors with "invalid result object … preferred_channels"
+#    AFTER the rule is created and saved to state, leaving it tainted. Recover
+#    with `terraform untaint signoz_alert.<name>` — don't let Terraform
+#    destroy/recreate. Expect this whenever a rule is added (e.g. a p95
+#    override).
+#  - Conditions must be written exactly as the server normalizes them or plan
+#    never converges: builder_query specs carry `source = ""`, clickhouse
+#    specs carry `disabled = false`, an empty groupBy is omitted entirely, and
+#    notification_settings pins `renotify` with a NON-empty alert_states
+#    (the server turns [] into null, so [] never settles; the value is inert
+#    while enabled = false). After adding a rule, reconcile it against
+#    `terraform state show`.
+#  - The API accepting a condition doesn't prove the rule evaluates. Rules #4
+#    and #5 fire on a single prod ERROR log, which is the cheap end-to-end
+#    test of collector → rule → Slack.
 
 # (provider requirement is declared in main.tf's required_providers)
 provider "signoz" {
@@ -28,7 +43,7 @@ provider "signoz" {
 
 locals {
   # The one notification channel every rule fires into (doc §3).
-  channel = "#eng-alerts" # name of the channel exactly as created in the UI
+  channel = "Slack" # name of the channel exactly as created in the UI
 
   # ---- Per-service tuning ---------------------------------------------
   # A service listed here is carved out of the baseline p95 rule and gets
@@ -64,6 +79,14 @@ resource "signoz_alert" "error_rate" {
   eval_window    = "5m0s"
   frequency      = "1m0s"
 
+  evaluation = jsonencode({
+    kind = "rolling"
+    spec = {
+      evalWindow = "5m0s"
+      frequency  = "1m0s"
+    }
+  })
+
   disabled = false
 
   condition = jsonencode({
@@ -76,6 +99,7 @@ resource "signoz_alert" "error_rate" {
           spec = {
             name         = "A"
             signal       = "traces"
+            source       = ""
             stepInterval = 60
             aggregations = [{ expression = "count()" }]
             filter       = { expression = "has_error = true AND ${local.prod}" }
@@ -88,6 +112,7 @@ resource "signoz_alert" "error_rate" {
           spec = {
             name         = "B"
             signal       = "traces"
+            source       = ""
             stepInterval = 60
             aggregations = [{ expression = "count()" }]
             filter       = { expression = local.prod }
@@ -121,14 +146,19 @@ resource "signoz_alert" "error_rate" {
 
   notification_settings = {
     group_by = ["service.name"]
+    renotify = {
+      enabled      = false
+      interval     = ""
+      alert_states = ["firing"]
+    }
   }
 }
 
 # ---------------------------------------------------------------------------
 # 2. New exception, per service (exceptions-based, ClickHouse)
 # ---------------------------------------------------------------------------
-# The SQL is the roughest of the five — author this one in the UI via
-# Exceptions → Create Alert and treat what the UI produced as canonical.
+# The SQL is the roughest of the five — the API accepted it, but until it has
+# fired on a real novel exception, treat it as unproven.
 resource "signoz_alert" "new_exception" {
   alert       = "New exception (fleet)"
   alert_type  = "EXCEPTIONS_BASED_ALERT"
@@ -142,6 +172,14 @@ resource "signoz_alert" "new_exception" {
   eval_window    = "5m0s"
   frequency      = "1m0s"
 
+  evaluation = jsonencode({
+    kind = "rolling"
+    spec = {
+      evalWindow = "5m0s"
+      frequency  = "1m0s"
+    }
+  })
+
   disabled = false
 
   condition = jsonencode({
@@ -151,8 +189,9 @@ resource "signoz_alert" "new_exception" {
       queries = [{
         type = "clickhouse_sql"
         spec = {
-          name  = "A"
-          query = <<-SQL
+          name     = "A"
+          disabled = false
+          query    = <<-SQL
             SELECT
               serviceName,
               count() AS value,
@@ -186,6 +225,11 @@ resource "signoz_alert" "new_exception" {
 
   notification_settings = {
     group_by = ["serviceName"]
+    renotify = {
+      enabled      = false
+      interval     = ""
+      alert_states = ["firing"]
+    }
   }
 }
 
@@ -205,6 +249,14 @@ resource "signoz_alert" "p95_latency" {
   eval_window    = "10m0s"
   frequency      = "1m0s"
 
+  evaluation = jsonencode({
+    kind = "rolling"
+    spec = {
+      evalWindow = "10m0s"
+      frequency  = "1m0s"
+    }
+  })
+
   disabled = false
 
   condition = jsonencode({
@@ -216,6 +268,7 @@ resource "signoz_alert" "p95_latency" {
         spec = {
           name         = "A"
           signal       = "traces"
+          source       = ""
           stepInterval = 60
           aggregations = [{ expression = "p95(duration_nano)" }]
           filter       = { expression = local.p95_baseline_filter }
@@ -241,6 +294,11 @@ resource "signoz_alert" "p95_latency" {
 
   notification_settings = {
     group_by = ["service.name"]
+    renotify = {
+      enabled      = false
+      interval     = ""
+      alert_states = ["firing"]
+    }
   }
 }
 
@@ -259,6 +317,14 @@ resource "signoz_alert" "p95_latency_override" {
   eval_window    = "10m0s"
   frequency      = "1m0s"
 
+  evaluation = jsonencode({
+    kind = "rolling"
+    spec = {
+      evalWindow = "10m0s"
+      frequency  = "1m0s"
+    }
+  })
+
   disabled = false
 
   condition = jsonencode({
@@ -270,6 +336,7 @@ resource "signoz_alert" "p95_latency_override" {
         spec = {
           name         = "A"
           signal       = "traces"
+          source       = ""
           stepInterval = 60
           aggregations = [{ expression = "p95(duration_nano)" }]
           filter       = { expression = "${local.prod} AND service.name = '${each.key}'" }
@@ -295,6 +362,11 @@ resource "signoz_alert" "p95_latency_override" {
 
   notification_settings = {
     group_by = ["service.name"]
+    renotify = {
+      enabled      = false
+      interval     = ""
+      alert_states = ["firing"]
+    }
   }
 }
 
@@ -318,6 +390,14 @@ resource "signoz_alert" "error_log_heartbeat" {
   eval_window    = "5m0s"
   frequency      = "1m0s"
 
+  evaluation = jsonencode({
+    kind = "rolling"
+    spec = {
+      evalWindow = "5m0s"
+      frequency  = "1m0s"
+    }
+  })
+
   disabled = false
 
   condition = jsonencode({
@@ -329,6 +409,7 @@ resource "signoz_alert" "error_log_heartbeat" {
         spec = {
           name         = "A"
           signal       = "logs"
+          source       = ""
           stepInterval = 60
           aggregations = [{ expression = "count()" }]
           filter       = { expression = "severity_text = 'ERROR' AND ${local.prod}" }
@@ -354,6 +435,11 @@ resource "signoz_alert" "error_log_heartbeat" {
 
   notification_settings = {
     group_by = ["service.name"]
+    renotify = {
+      enabled      = false
+      interval     = ""
+      alert_states = ["firing"]
+    }
   }
 }
 
@@ -379,6 +465,14 @@ resource "signoz_alert" "error_log_hygiene" {
   eval_window    = "5m0s"
   frequency      = "1m0s"
 
+  evaluation = jsonencode({
+    kind = "rolling"
+    spec = {
+      evalWindow = "5m0s"
+      frequency  = "1m0s"
+    }
+  })
+
   disabled = false
 
   condition = jsonencode({
@@ -390,10 +484,10 @@ resource "signoz_alert" "error_log_hygiene" {
         spec = {
           name         = "A"
           signal       = "logs"
+          source       = ""
           stepInterval = 60
           aggregations = [{ expression = "count()" }]
           filter       = { expression = "severity_text = 'ERROR' AND service.name NOT EXISTS AND ${local.prod}" }
-          groupBy      = []
           having       = { expression = "" }
         }
       }]
@@ -412,15 +506,13 @@ resource "signoz_alert" "error_log_hygiene" {
       }]
     }
   })
-}
 
-# ---------------------------------------------------------------------------
-# Bootstrap adoption — author the five rules in the UI, put each rule's id
-# (the number in the alert's URL) here, `terraform apply` once, reconcile the
-# conditions above against `terraform state show`, then delete these blocks.
-# ---------------------------------------------------------------------------
-# import { to = signoz_alert.error_rate,          id = "1" }
-# import { to = signoz_alert.new_exception,       id = "2" }
-# import { to = signoz_alert.p95_latency,         id = "3" }
-# import { to = signoz_alert.error_log_heartbeat, id = "4" }
-# import { to = signoz_alert.error_log_hygiene,   id = "5" }
+  notification_settings = {
+    group_by = []
+    renotify = {
+      enabled      = false
+      interval     = ""
+      alert_states = ["firing"]
+    }
+  }
+}

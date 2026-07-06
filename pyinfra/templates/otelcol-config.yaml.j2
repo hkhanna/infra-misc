@@ -22,6 +22,11 @@ processors:
       - key: host.name
         value: {{ host.data.hostname }}
         action: upsert
+      # Fleet baseline alert rules filter logs on deployment.environment;
+      # journald logs never pass through the SDK, so the collector stamps it.
+      - key: deployment.environment
+        value: prod
+        action: upsert
 
   batch:
     timeout: 5s

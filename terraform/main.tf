@@ -20,6 +20,10 @@ terraform {
       source  = "digitalocean/digitalocean"
       version = "~> 2.0"
     }
+    signoz = {
+      source  = "SigNoz/signoz"
+      version = "~> 0.0.14"
+    }
   }
 }
 
